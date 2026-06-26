@@ -58,6 +58,20 @@ default_space = "TEST"
 
 Tokens must come from environment variables. Never write tokens in the config file.
 
+### Token management
+
+Token resolution order: `CONFLUENCE_TOKEN` env var → system keyring → error.
+
+Store a token in the system keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager):
+
+```bash
+cnowledje config token set                    # default profile
+cnowledje config token set --profile staging  # named profile
+cnowledje config token delete                 # remove from keyring
+```
+
+If `CONFLUENCE_TOKEN` is set (and non-empty), it always takes precedence over the keyring.
+
 ## Usage
 
 ### Search
@@ -104,6 +118,10 @@ cnowledje page 123456789 --format plain
 
 # Custom character limit
 cnowledje page 123456789 --max-chars 10000
+
+# Select a specific language from sv-translation macros (Scroll Versions pages)
+cnowledje page 123456789 --language ja
+cnowledje page 123456789 --language en
 ```
 
 ### Check configuration

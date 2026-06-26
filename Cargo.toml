@@ -27,6 +27,9 @@ toml = "0.8"
 dirs = "5"
 scraper = "0.19"
 regex = "1"
+inquire = "0.7"
+keyring = "4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+tempfile = "3"

@@ -57,7 +57,10 @@ pub fn print_page_json(output: &PageOutput) -> Result<(), ConfluenceError> {
 /// Print a page's Markdown content with a brief metadata header.
 pub fn print_page_markdown(output: &PageOutput) {
     println!("<!-- Notice: {} -->", output.notice);
-    println!("<!-- Title: {} | Space: {} -->", output.title, output.space_key);
+    println!(
+        "<!-- Title: {} | Space: {} -->",
+        output.title, output.space_key
+    );
     println!("<!-- URL: {} -->", output.url);
     if let Some(ts) = &output.last_modified {
         println!("<!-- Last modified: {} -->", ts);

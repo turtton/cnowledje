@@ -25,6 +25,9 @@
 
           cargoLock.lockFile = ./Cargo.lock;
 
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.dbus ];
+
           meta = {
             description = "Read-only Confluence CLI for Server/Data Center";
             homepage = "https://github.com/turtton/cnowledje";

@@ -5,7 +5,7 @@ pub enum ConfluenceError {
     #[error("CONFLUENCE_BASE_URL is not set")]
     MissingBaseUrl,
 
-    #[error("CONFLUENCE_TOKEN is not set")]
+    #[error("CONFLUENCE_TOKEN is not set and no token found in system keyring")]
     MissingToken,
 
     #[error("space \"{0}\" is not allowed by the current profile")]
@@ -17,7 +17,9 @@ pub enum ConfluenceError {
     #[error("HTTP {status}: {message}")]
     HttpError { status: u16, message: String },
 
-    #[error("Unauthorized: check your CONFLUENCE_TOKEN")]
+    #[error(
+        "Unauthorized: check your Confluence token (CONFLUENCE_TOKEN env var or system keyring)"
+    )]
     Unauthorized,
 
     #[error("Forbidden: the account does not have permission to access this resource")]
@@ -34,6 +36,9 @@ pub enum ConfluenceError {
 
     #[error("config error: {0}")]
     ConfigError(String),
+
+    #[error("keyring error: {0}")]
+    KeyringError(String),
 
     #[error("request error: {0}")]
     RequestError(#[from] reqwest::Error),
@@ -60,6 +65,7 @@ impl ConfluenceError {
             ConfluenceError::InvalidPageUrl(_) => "invalid_page_url",
             ConfluenceError::LimitExceeded { .. } => "limit_exceeded",
             ConfluenceError::ConfigError(_) => "config_error",
+            ConfluenceError::KeyringError(_) => "keyring_error",
             ConfluenceError::RequestError(_) => "request_error",
             ConfluenceError::UrlError(_) => "url_error",
             ConfluenceError::JsonError(_) => "json_error",

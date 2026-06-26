@@ -25,7 +25,7 @@ No CI exists yet. Run `cargo fmt && cargo clippy && cargo test` before committin
 | `src/main.rs` | Binary entrypoint; adds `mod cli` (not part of lib) |
 | `src/cli.rs` | clap arg structs — **binary-only, not in lib** |
 | `src/client.rs` | `ConfluenceClient` — HTTP (GET-only) |
-| `src/config.rs` | Config loading: env vars → TOML file → defaults |
+| `src/config.rs` | Config loading: env vars → system keyring (token only) → TOML file → defaults |
 | `src/cql.rs` | CQL generation + page ID extraction |
 | `src/markdown.rs` | Confluence storage HTML → Markdown converter |
 | `src/models.rs` | API response types + CLI output types + `NOTICE` constant |
@@ -38,12 +38,12 @@ No CI exists yet. Run `cargo fmt && cargo clippy && cargo test` before committin
 
 ## Configuration
 
-Priority: **env vars > TOML file > hard-coded defaults**
+Priority: **env vars > system keyring (token only) > TOML file > hard-coded defaults**
 
 | Env var | Required | Default |
 |---|---|---|
 | `CONFLUENCE_BASE_URL` | env **or** TOML `base_url` | — |
-| `CONFLUENCE_TOKEN` | env **only** (never in TOML) | — |
+| `CONFLUENCE_TOKEN` | env, keyring, or both (never in TOML) | — |
 | `CONFLUENCE_API_PATH` | No | `/rest/api` |
 | `CONFLUENCE_ALLOWED_SPACES` | No | (all spaces allowed) |
 | `CONFLUENCE_DEFAULT_SPACE` | No | — |
@@ -52,7 +52,9 @@ Config file: `~/.config/cnowledje/config.toml` (profiles: `[default]`, `[staging
 
 TOML-only settings (no env var override): `default_limit` (default: 10), `max_limit` (default: 50), `max_page_chars` (default: 50000). Note: `default_limit` is loaded but not currently applied to the CLI's `--limit` default (which is hardcoded to 10 in clap).
 
-**Token must come from env var — never write it in the config file.**
+**Token resolution order: `CONFLUENCE_TOKEN` env var → system keyring (service `cnowledje`, account = profile name) → error. Never write the token in the config file.**
+
+Token keyring commands: `cnowledje config token set [--profile <name>]` / `cnowledje config token delete [--profile <name>]`
 
 `cnowledje config check` validates config and makes a live API connectivity check — requires a real Confluence instance to succeed.
 

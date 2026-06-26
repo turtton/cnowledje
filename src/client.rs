@@ -19,16 +19,14 @@ impl ConfluenceClient {
     /// The token value is marked sensitive so it will not appear in debug
     /// output from `reqwest`.
     pub fn new(base_url: &str, api_path: &str, token: &str) -> Result<Self, ConfluenceError> {
-        let mut auth_value = HeaderValue::from_str(&format!("Bearer {}", token))
-            .map_err(|_| ConfluenceError::ConfigError("invalid token: contains non-ASCII bytes".to_string()))?;
+        let mut auth_value = HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|_| {
+            ConfluenceError::ConfigError("invalid token: contains non-ASCII bytes".to_string())
+        })?;
         auth_value.set_sensitive(true);
 
         let mut default_headers = HeaderMap::new();
         default_headers.insert(header::AUTHORIZATION, auth_value);
-        default_headers.insert(
-            header::ACCEPT,
-            HeaderValue::from_static("application/json"),
-        );
+        default_headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
 
         let client = Client::builder()
             .default_headers(default_headers)

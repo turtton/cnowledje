@@ -70,7 +70,8 @@ pub fn extract_page_id(input: &str) -> Result<String, ConfluenceError> {
     }
 
     // Try URL parsing.
-    let url = Url::parse(trimmed).map_err(|_| ConfluenceError::InvalidPageUrl(input.to_string()))?;
+    let url =
+        Url::parse(trimmed).map_err(|_| ConfluenceError::InvalidPageUrl(input.to_string()))?;
 
     // ?pageId=<id>
     for (key, val) in url.query_pairs() {
@@ -150,8 +151,7 @@ mod tests {
 
     #[test]
     fn test_extract_page_id_path_segment() {
-        let id =
-            extract_page_id("https://confluence.example.local/pages/123456789").unwrap();
+        let id = extract_page_id("https://confluence.example.local/pages/123456789").unwrap();
         assert_eq!(id, "123456789");
     }
 

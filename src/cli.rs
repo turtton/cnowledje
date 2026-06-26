@@ -77,6 +77,11 @@ pub struct PageArgs {
     #[arg(long)]
     pub include_metadata: bool,
 
+    /// Language code to select when the page contains sv-translation macros (e.g. ja, en).
+    /// If omitted, the first sv-translation block is expanded.
+    #[arg(long)]
+    pub language: Option<String>,
+
     /// Use a specific configuration profile.
     #[arg(long)]
     pub profile: Option<String>,
@@ -95,6 +100,15 @@ impl PageArgs {
 
 // ── config ────────────────────────────────────────────────────────────────────
 
+fn parse_profile_name(s: &str) -> Result<String, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        Err("プロファイル名は空にできません".to_string())
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
 #[derive(Args)]
 pub struct ConfigArgs {
     #[command(subcommand)]
@@ -107,6 +121,39 @@ pub enum ConfigSubcommand {
     Check {
         /// Profile to check.
         #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Interactively create or update a configuration profile.
+    Init {
+        /// Profile name to initialize (default: "default").
+        #[arg(long, default_value = "default", value_parser = parse_profile_name)]
+        profile: String,
+        /// Overwrite existing profile without confirmation prompt.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Manage the API token stored in the system keyring.
+    Token(TokenArgs),
+}
+
+#[derive(Args)]
+pub struct TokenArgs {
+    #[command(subcommand)]
+    pub command: TokenSubcommand,
+}
+
+#[derive(Subcommand)]
+pub enum TokenSubcommand {
+    /// Store a token in the system keyring for the given profile.
+    Set {
+        /// Profile to store the token for.
+        #[arg(long, value_parser = parse_profile_name)]
+        profile: Option<String>,
+    },
+    /// Remove the token for the given profile from the system keyring.
+    Delete {
+        /// Profile to remove the token for.
+        #[arg(long, value_parser = parse_profile_name)]
         profile: Option<String>,
     },
 }
