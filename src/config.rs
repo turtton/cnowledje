@@ -33,7 +33,7 @@ pub struct Config {
 
 /// Default path for the TOML config file.
 pub fn default_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("confluence-ro").join("config.toml"))
+    dirs::config_dir().map(|d| d.join("cnowledje").join("config.toml"))
 }
 
 /// Load the named profile from a TOML config file, if it exists.

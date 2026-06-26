@@ -1,12 +1,12 @@
 use clap::{Args, Parser, Subcommand};
 
-use confluence_ro::types::{PageFormat, SearchIn};
+use cnowledje::types::{PageFormat, SearchIn};
 
 #[derive(Parser)]
 #[command(
-    name = "confluence-ro",
+    name = "cnowledje",
     about = "Read-only Confluence CLI for Server/Data Center",
-    long_about = "confluence-ro provides safe, read-only access to Confluence pages.\n\
+    long_about = "cnowledje provides safe, read-only access to Confluence pages.\n\
                   It uses GET requests only and never performs write operations.\n\
                   Designed for use by developers and AI agents.",
     version

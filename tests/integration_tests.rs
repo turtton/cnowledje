@@ -1,13 +1,13 @@
-//! Integration tests for the confluence-ro library.
+//! Integration tests for the cnowledje library.
 //!
 //! These tests cover the core logic without making live HTTP requests.
 //! HTTP client behavior (Authorization headers, status code handling) is
 //! verified by unit tests inside each module.
 
-use confluence_ro::cql;
-use confluence_ro::markdown;
-use confluence_ro::models;
-use confluence_ro::types::SearchIn;
+use cnowledje::cql;
+use cnowledje::markdown;
+use cnowledje::models;
+use cnowledje::types::SearchIn;
 
 // ── CQL generation ─────────────────────────────────────────────────────────────
 
@@ -205,7 +205,7 @@ fn notice_string_present() {
 
 // ── format helpers ─────────────────────────────────────────────────────────────
 
-use confluence_ro::format::make_page_url;
+use cnowledje::format::make_page_url;
 
 #[test]
 fn make_page_url_with_api_base() {

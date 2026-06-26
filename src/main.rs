@@ -4,18 +4,18 @@ use clap::Parser;
 use std::collections::{HashMap, HashSet};
 
 use cli::{Cli, Commands, ConfigSubcommand};
-use confluence_ro::client::ConfluenceClient;
-use confluence_ro::config::{load_config, resolve_spaces, validate_spaces};
-use confluence_ro::cql::{build_text_cql, build_title_cql, extract_page_id};
-use confluence_ro::error::ConfluenceError;
-use confluence_ro::format::{
+use cnowledje::client::ConfluenceClient;
+use cnowledje::config::{load_config, resolve_spaces, validate_spaces};
+use cnowledje::cql::{build_text_cql, build_title_cql, extract_page_id};
+use cnowledje::error::ConfluenceError;
+use cnowledje::format::{
     make_page_url, print_error_json, print_page_json, print_page_markdown,
     print_page_plain, print_page_storage_html, print_search_human, print_search_json,
 };
-use confluence_ro::markdown;
-use confluence_ro::models::{PageOutput, SearchOutput, SearchResultOutput, NOTICE};
-use confluence_ro::models::SearchResult;
-use confluence_ro::types::{PageFormat, SearchIn};
+use cnowledje::markdown;
+use cnowledje::models::{PageOutput, SearchOutput, SearchResultOutput, NOTICE};
+use cnowledje::models::SearchResult;
+use cnowledje::types::{PageFormat, SearchIn};
 
 #[tokio::main]
 async fn main() {
