@@ -1,0 +1,32 @@
+[package]
+name = "confluence-ro"
+version = "0.1.0"
+edition = "2021"
+description = "Read-only Confluence CLI for Server/Data Center"
+
+[lib]
+name = "confluence_ro"
+path = "src/lib.rs"
+
+[[bin]]
+name = "confluence-ro"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+url = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.8"
+dirs = "5"
+scraper = "0.19"
+regex = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
