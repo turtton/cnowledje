@@ -1,0 +1,84 @@
+# AGENTS.md — cnowledje
+
+Read-only Confluence CLI (Server / Data Center) written in Rust.
+
+## Commands
+
+```bash
+cargo build                  # debug build
+cargo build --release        # release build
+cargo test                   # unit tests (in-module) + integration tests
+cargo clippy                 # lint
+cargo fmt                    # format
+cargo install --path .       # install binary as `cnowledje`
+nix build                    # Nix package build
+nix develop                  # enter dev shell (provides bashInteractive)
+```
+
+No CI exists yet. Run `cargo fmt && cargo clippy && cargo test` before committing.
+
+## Project structure
+
+| Path | Role |
+|---|---|
+| `src/lib.rs` | Library crate — re-exports all public modules |
+| `src/main.rs` | Binary entrypoint; adds `mod cli` (not part of lib) |
+| `src/cli.rs` | clap arg structs — **binary-only, not in lib** |
+| `src/client.rs` | `ConfluenceClient` — HTTP (GET-only) |
+| `src/config.rs` | Config loading: env vars → TOML file → defaults |
+| `src/cql.rs` | CQL generation + page ID extraction |
+| `src/markdown.rs` | Confluence storage HTML → Markdown converter |
+| `src/models.rs` | API response types + CLI output types + `NOTICE` constant |
+| `src/types.rs` | `SearchIn`, `PageFormat` enums |
+| `src/error.rs` | `ConfluenceError` enum |
+| `src/format.rs` | Output formatting helpers |
+| `tests/integration_tests.rs` | Integration tests — use lib crate, no live HTTP |
+
+> `src/cli.rs` is NOT exported from `src/lib.rs`. Integration tests import from the lib crate directly.
+
+## Configuration
+
+Priority: **env vars > TOML file > hard-coded defaults**
+
+| Env var | Required | Default |
+|---|---|---|
+| `CONFLUENCE_BASE_URL` | env **or** TOML `base_url` | — |
+| `CONFLUENCE_TOKEN` | env **only** (never in TOML) | — |
+| `CONFLUENCE_API_PATH` | No | `/rest/api` |
+| `CONFLUENCE_ALLOWED_SPACES` | No | (all spaces allowed) |
+| `CONFLUENCE_DEFAULT_SPACE` | No | — |
+
+Config file: `~/.config/cnowledje/config.toml` (profiles: `[default]`, `[staging]`, …)
+
+TOML-only settings (no env var override): `default_limit` (default: 10), `max_limit` (default: 50), `max_page_chars` (default: 50000). Note: `default_limit` is loaded but not currently applied to the CLI's `--limit` default (which is hardcoded to 10 in clap).
+
+**Token must come from env var — never write it in the config file.**
+
+`cnowledje config check` validates config and makes a live API connectivity check — requires a real Confluence instance to succeed.
+
+## Key implementation details
+
+- **`both` search** runs two CQL queries concurrently via `tokio::try_join!` (title + text), deduplicates by page ID, title matches sorted first. Internal fetch limit per query: `min(limit * 2, max_limit)`.
+- **CQL is generated internally** — raw CQL input from users/agents is intentionally not supported.
+- **Token redaction** — `CONFLUENCE_TOKEN` is never logged. Tracing output goes to stderr only.
+- **Confluence macros** (`ac:structured-macro`) are rendered as `[unsupported confluence macro: NAME]` in Markdown output.
+- **Content truncation** appends `[content truncated]` when `max_chars` is exceeded; effective limit is `min(--max-chars, config.max_page_chars)`, counted in Unicode chars, not bytes.
+- **JSON error output** — in `--json` mode, errors are emitted as `{"error":{"kind":"…","message":"…"}}`.
+- **Space allowlist** — if `allowed_spaces` is set, passing an unlisted space to `search` is a hard error. `page <id>` does **not** check `allowed_spaces`; access is controlled solely by the token's Confluence permissions.
+- **Page URL formats** — `page` accepts a numeric ID or a URL containing `?pageId=<id>` or `/pages/<id>`. Pretty URLs like `/display/SPACE/Title` are **not** supported and return an error.
+
+## Testing
+
+Unit tests live inside each module (`#[cfg(test)]`). Integration tests are in `tests/integration_tests.rs` and cover:
+- CQL generation (single/multi-space, escaping, `both`/`title`/`text` modes)
+- Page ID extraction from numeric strings and URLs (`?pageId=` and `/pages/<id>` patterns)
+- Markdown conversion (headings, lists, tables, code blocks, macros, Japanese UTF-8, truncation)
+- Format helpers (`make_page_url`)
+
+No live HTTP tests exist. Mock server tests are a planned future addition.
+
+To run a single test: `cargo test <test_fn_name>`
+
+## Intentionally out of scope
+
+Do not add: raw CQL input, write operations (POST/PUT/PATCH/DELETE), CQL `OR` for `both` mode (uses two separate queries by design), MCP server, RAG/embeddings, OAuth/SSO, attachment upload/delete.
