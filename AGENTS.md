@@ -63,7 +63,17 @@ Token keyring commands: `cnowledje config token set [--profile <name>]` / `cnowl
 - **`both` search** runs two CQL queries concurrently via `tokio::try_join!` (title + text), deduplicates by page ID, title matches sorted first. Internal fetch limit per query: `min(limit * 2, max_limit)`.
 - **CQL is generated internally** — raw CQL input from users/agents is intentionally not supported.
 - **Token redaction** — `CONFLUENCE_TOKEN` is never logged. Tracing output goes to stderr only.
-- **Confluence macros** (`ac:structured-macro`) are rendered as `[unsupported confluence macro: NAME]` in Markdown output.
+- **Confluence macros** (`ac:structured-macro`) — supported macros are converted as follows:
+  - `expand` → `**▸ title**` + body inline
+  - `code` / `noformat` → fenced code block (with language for `code`)
+  - `info` / `note` / `warning` / `tip` → `> **Label:**` blockquote
+  - `panel` → blockquote with optional title header
+  - `status` → inline `[title]` badge (rendered as `<span>` to avoid breaking paragraphs)
+  - `toc` → `[TOC]`
+  - `anchor` → silent (no output)
+  - `excerpt-include` / `excerpt-includeplus` → `> [excerpt from: Page Name]` placeholder (cross-page fetch is out of scope)
+  - `sv-translation` → language-selected expansion (see `--language` flag)
+  - All other macros → `[unsupported confluence macro: NAME]`
 - **Content truncation** appends `[content truncated]` when `max_chars` is exceeded; effective limit is `min(--max-chars, config.max_page_chars)`, counted in Unicode chars, not bytes.
 - **JSON error output** — in `--json` mode, errors are emitted as `{"error":{"kind":"…","message":"…"}}`.
 - **Space allowlist** — if `allowed_spaces` is set, passing an unlisted space to `search` is a hard error. `page <id>` does **not** check `allowed_spaces`; access is controlled solely by the token's Confluence permissions.
@@ -74,7 +84,7 @@ Token keyring commands: `cnowledje config token set [--profile <name>]` / `cnowl
 Unit tests live inside each module (`#[cfg(test)]`). Integration tests are in `tests/integration_tests.rs` and cover:
 - CQL generation (single/multi-space, escaping, `both`/`title`/`text` modes)
 - Page ID extraction from numeric strings and URLs (`?pageId=` and `/pages/<id>` patterns)
-- Markdown conversion (headings, lists, tables, code blocks, macros, Japanese UTF-8, truncation)
+- Markdown conversion (headings, lists, tables, code blocks, macros, Japanese UTF-8, truncation, sv-translation language selection)
 - Format helpers (`make_page_url`)
 
 No live HTTP tests exist. Mock server tests are a planned future addition.

@@ -11,6 +11,8 @@ TYPICAL WORKFLOW:
 Run `cnowledje <command> --help` for per-command options and examples.
 See `cnowledje config --help` for configuration and token management.";
 
+// NOTE: The JSON shape documented below must be kept in sync with SearchOutput / SearchResultOutput
+// in src/models.rs. Update both when the output types change.
 const SEARCH_AFTER_HELP: &str = "\
 EXAMPLES:
   # Search title and body across the default space
@@ -136,10 +138,6 @@ pub struct PageArgs {
     /// Maximum content length in characters.
     #[arg(long, default_value = "50000")]
     pub max_chars: usize,
-
-    /// Include metadata fields in markdown output.
-    #[arg(long)]
-    pub include_metadata: bool,
 
     /// Language code to select when the page contains sv-translation macros (e.g. ja, en).
     /// If omitted, the first sv-translation block is expanded.
