@@ -161,22 +161,25 @@ fn markdown_table_with_header() {
 fn markdown_confluence_macro_placeholder() {
     let html = r#"<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">PROJ-1</ac:parameter></ac:structured-macro>"#;
     let md = markdown::html_to_markdown(html, 50_000, None);
+    // Parameter values are surfaced in the placeholder so ticket keys remain readable.
     assert!(
-        md.contains("[unsupported confluence macro: jira]"),
-        "got: {}",
+        md.contains("[unsupported confluence macro: jira"),
+        "placeholder missing: {}",
         md
     );
+    assert!(md.contains("PROJ-1"), "param value should appear: {}", md);
 }
 
 #[test]
-fn markdown_confluence_info_macro_placeholder() {
+fn markdown_confluence_info_macro_blockquote() {
     let html = r#"<ac:structured-macro ac:name="info"><ac:rich-text-body><p>Note here</p></ac:rich-text-body></ac:structured-macro>"#;
     let md = markdown::html_to_markdown(html, 50_000, None);
     assert!(
-        md.contains("[unsupported confluence macro: info]"),
-        "got: {}",
+        md.contains("> **Info:**"),
+        "Info label should appear: {}",
         md
     );
+    assert!(md.contains("Note here"), "body should appear: {}", md);
 }
 
 #[test]
@@ -240,6 +243,52 @@ fn markdown_sv_translation_expand_first_when_no_language() {
     assert!(
         !md.contains("English content"),
         "second block should not be expanded"
+    );
+}
+
+// ── Macro conversion integration tests ────────────────────────────────────────
+
+#[test]
+fn markdown_confluence_code_macro() {
+    let html = r#"<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">rust</ac:parameter>
+  <ac:plain-text-body><![CDATA[fn main() {
+    println!("hello");
+}]]></ac:plain-text-body>
+</ac:structured-macro>"#;
+    let md = markdown::html_to_markdown(html, 50_000, None);
+    assert!(md.contains("```rust"), "language fence: {}", md);
+    assert!(md.contains("fn main()"), "code body: {}", md);
+    assert!(
+        md.contains(r#"println!("hello")"#),
+        "special chars in code: {}",
+        md
+    );
+}
+
+#[test]
+fn markdown_confluence_expand_macro() {
+    let html = r#"<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">Details</ac:parameter>
+  <ac:rich-text-body><p>Expanded body content.</p></ac:rich-text-body>
+</ac:structured-macro>"#;
+    let md = markdown::html_to_markdown(html, 50_000, None);
+    assert!(md.contains("**▸ Details**"), "expand title: {}", md);
+    assert!(md.contains("Expanded body content."), "expand body: {}", md);
+}
+
+#[test]
+fn markdown_confluence_status_inline() {
+    let html = r#"<p>Task is <ac:structured-macro ac:name="status"><ac:parameter ac:name="title">IN PROGRESS</ac:parameter></ac:structured-macro> now.</p>"#;
+    let md = markdown::html_to_markdown(html, 50_000, None);
+    assert!(md.contains("[IN PROGRESS]"), "status badge: {}", md);
+    // All text should appear together, not split across separate lines
+    let lines: Vec<&str> = md.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("Task is") && l.contains("[IN PROGRESS]") && l.contains("now.")),
+        "status must not break paragraph: {md}",
     );
 }
 

@@ -46,32 +46,82 @@ fn ac_rich_text_body_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"</?ac:rich-text-body[^>]*>").unwrap())
 }
 
-fn ac_parameter_re() -> &'static Regex {
+/// Matches an `<ac:parameter>` element including its content (non-greedy).
+/// Used in the final cleanup pass to remove any parameters not consumed by
+/// `rewrite_macros()` (e.g. parameters that appear after the rich-text-body).
+fn ac_param_with_content_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"</?ac:parameter[^>]*>").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?s)<ac:parameter[^>]*>.*?</ac:parameter>").unwrap())
 }
 
-fn ac_default_parameter_re() -> &'static Regex {
+fn ac_default_param_with_content_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"</?ac:default-parameter[^>]*>").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"(?s)<ac:default-parameter[^>]*>.*?</ac:default-parameter>").unwrap()
+    })
 }
 
-fn sv_macro_name_re() -> &'static Regex {
+/// Matches a CDATA-wrapped `<ac:plain-text-body>` element.
+fn plain_text_body_cdata_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"\bac:name\s*=\s*"sv-translation""#).unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"(?s)<ac:plain-text-body[^>]*>\s*<!\[CDATA\[(.*?)\]\]>\s*</ac:plain-text-body>")
+            .unwrap()
+    })
 }
 
-fn ac_language_name_re() -> &'static Regex {
+/// Matches the `ac:name` attribute inside a parameter open-tag.
+fn ac_param_name_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"\bac:name\s*=\s*"language""#).unwrap())
+    RE.get_or_init(|| Regex::new(r#"\bac:name="([^"]*)""#).unwrap())
 }
 
-fn escape_html_attr(value: &str) -> String {
+/// Matches any remaining HTML/XML tag (used to strip tags from param values).
+fn html_tag_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"<[^>]*>").unwrap())
+}
+
+// ── Selector helpers (compiled once) ─────────────────────────────────────────
+
+fn body_sel() -> &'static Selector {
+    static SEL: OnceLock<Selector> = OnceLock::new();
+    SEL.get_or_init(|| Selector::parse("body").unwrap())
+}
+
+fn code_sel() -> &'static Selector {
+    static SEL: OnceLock<Selector> = OnceLock::new();
+    SEL.get_or_init(|| Selector::parse("code").unwrap())
+}
+
+fn pre_sel() -> &'static Selector {
+    static SEL: OnceLock<Selector> = OnceLock::new();
+    SEL.get_or_init(|| Selector::parse("pre").unwrap())
+}
+
+fn tr_sel() -> &'static Selector {
+    static SEL: OnceLock<Selector> = OnceLock::new();
+    SEL.get_or_init(|| Selector::parse("tr").unwrap())
+}
+
+fn th_td_sel() -> &'static Selector {
+    static SEL: OnceLock<Selector> = OnceLock::new();
+    SEL.get_or_init(|| Selector::parse("th, td").unwrap())
+}
+
+fn first_row_th_sel() -> &'static Selector {
+    static SEL: OnceLock<Selector> = OnceLock::new();
+    SEL.get_or_init(|| Selector::parse("tr:first-child th").unwrap())
+}
+
+// ── Escaping helpers ──────────────────────────────────────────────────────────
+
+/// Full HTML text escaping (`&`, `<`, `>`). Used for raw (CDATA) code content.
+fn escape_html_text(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
             '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             _ => out.push(ch),
@@ -79,6 +129,48 @@ fn escape_html_attr(value: &str) -> String {
     }
     out
 }
+
+/// Minimal escaping for parameter values that are already XML-entity-encoded.
+/// Only `"` needs to be escaped so the value is safe inside a double-quoted
+/// HTML attribute.  Re-encoding `&` would cause double-escaping.
+fn escape_attr_preserving_entities(value: &str) -> String {
+    value.replace('"', "&quot;")
+}
+
+/// Normalise a parameter name to a safe HTML attribute name fragment.
+/// Empty string (for `<ac:default-parameter>`) becomes `"default"`.
+fn sanitize_param_name(name: &str) -> String {
+    if name.is_empty() {
+        return "default".to_string();
+    }
+    name.to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Clean a raw parameter value for use as an HTML attribute value.
+/// Resolves `ri:page`/`ri:attachment` references, strips remaining tags,
+/// and escapes the result.
+fn clean_param_value(raw: &str) -> String {
+    let s = ri_page_re()
+        .replace_all(raw, |caps: &regex::Captures| caps[1].to_string())
+        .into_owned();
+    let s = ri_attachment_re()
+        .replace_all(&s, |caps: &regex::Captures| caps[1].to_string())
+        .into_owned();
+    let s = ac_link_re().replace_all(&s, "").into_owned();
+    let s = html_tag_re().replace_all(&s, "").into_owned();
+    escape_attr_preserving_entities(s.trim())
+}
+
+// ── Whitespace helper (re-used by consume_params) ────────────────────────────
 
 fn skip_ws(s: &str, mut i: usize, limit: usize) -> usize {
     while i < limit {
@@ -93,113 +185,276 @@ fn skip_ws(s: &str, mut i: usize, limit: usize) -> usize {
     i
 }
 
-fn find_language_param(
-    html: &str,
-    mut pos: usize,
-    limit: usize,
-) -> Option<(std::ops::Range<usize>, &str)> {
-    const PARAM_CLOSE: &str = "</ac:parameter>";
-    let lang_name_re = ac_language_name_re();
+// ── Parameter consumer ────────────────────────────────────────────────────────
+
+/// Starting at `pos` in `html`, consume any leading `<ac:parameter>` and
+/// `<ac:default-parameter>` elements, returning `(name, value)` pairs and
+/// the position immediately after the last consumed element.
+fn consume_params(html: &str, pos: usize) -> (Vec<(String, String)>, usize) {
+    let mut params = Vec::new();
+    let mut cursor = pos;
 
     loop {
-        pos = skip_ws(html, pos, limit);
+        cursor = skip_ws(html, cursor, html.len());
 
-        if pos >= limit || !html[pos..limit].starts_with("<ac:parameter") {
-            return None;
+        let rest = &html[cursor..];
+        let (is_param, is_default) = (
+            rest.starts_with("<ac:parameter"),
+            rest.starts_with("<ac:default-parameter"),
+        );
+        if !is_param && !is_default {
+            break;
         }
 
-        let tag_end = pos + html[pos..limit].find('>')? + 1;
-        let close_start = tag_end + html[tag_end..limit].find(PARAM_CLOSE)?;
-        let close_end = close_start + PARAM_CLOSE.len();
+        let close_tag = if is_default {
+            "</ac:default-parameter>"
+        } else {
+            "</ac:parameter>"
+        };
 
-        if lang_name_re.is_match(&html[pos..tag_end]) {
-            return Some((pos..close_end, &html[tag_end..close_start]));
-        }
-
-        pos = close_end;
-    }
-}
-
-fn rewrite_sv_translation_openings(html: &str) -> String {
-    let sv_name_re = sv_macro_name_re();
-    let mut out = String::with_capacity(html.len());
-    let mut cursor = 0;
-
-    while let Some(rel_start) = html[cursor..].find("<ac:structured-macro") {
-        let start = cursor + rel_start;
-        let Some(rel_open_end) = html[start..].find('>') else {
+        // Note: ac:name attribute values are simple identifiers and cannot
+        // contain '>'.  If that invariant ever breaks, tag_end would land
+        // inside the attribute value, producing a garbage open_tag_content.
+        let Some(rel_gt) = rest.find('>') else {
             break;
         };
-        let open_end = start + rel_open_end + 1;
-        let open_tag = &html[start..open_end];
+        let open_tag_content = &rest[..rel_gt]; // everything before '>'
+        let tag_end = cursor + rel_gt + 1;
 
-        if !sv_name_re.is_match(open_tag) {
-            out.push_str(&html[cursor..open_end]);
-            cursor = open_end;
-            continue;
-        }
-
-        let Some(rel_close) = html[open_end..].find("</ac:structured-macro>") else {
-            out.push_str(&html[cursor..open_end]);
-            cursor = open_end;
-            continue;
+        let Some(rel_close) = html[tag_end..].find(close_tag) else {
+            // Malformed: parameter has no matching close tag.  Advance past
+            // the open tag to avoid emitting the raw XML tag into output,
+            // then stop consuming parameters.
+            cursor = tag_end;
+            break;
         };
-        let close_start = open_end + rel_close;
+        let value_end = tag_end + rel_close;
+        let close_end = value_end + close_tag.len();
 
-        if let Some((param_range, raw_lang)) = find_language_param(html, open_end, close_start) {
-            let lang = escape_html_attr(raw_lang.trim());
-            out.push_str(&html[cursor..start]);
-            out.push_str(&format!(
-                r#"<div class="ac-macro" data-macro-name="sv-translation" data-macro-language="{lang}">"#
-            ));
-            out.push_str(&html[open_end..param_range.start]);
-            cursor = param_range.end;
+        let param_name = if let Some(caps) = ac_param_name_re().captures(open_tag_content) {
+            sanitize_param_name(&caps[1])
+        } else if is_default {
+            "default".to_string()
         } else {
-            out.push_str(&html[cursor..open_end]);
-            cursor = open_end;
-        }
+            sanitize_param_name("")
+        };
+
+        let raw_value = &html[tag_end..value_end];
+        let value = clean_param_value(raw_value);
+
+        params.push((param_name, value));
+        cursor = close_end;
     }
 
-    out.push_str(&html[cursor..]);
-    out
+    (params, cursor)
 }
 
 // ── Pre-processing ────────────────────────────────────────────────────────────
 
-fn preprocess(html: &str) -> String {
-    let s = rewrite_sv_translation_openings(html);
+/// Macros that should become `<span>` rather than `<div>` so that they do not
+/// break open a surrounding `<p>` element when html5ever parses the result.
+const INLINE_MACROS: &[&str] = &["status", "anchor"];
 
-    let s = macro_open_re()
-        .replace_all(&s, |caps: &regex::Captures| {
-            format!(r#"<div class="ac-macro" data-macro-name="{}">"#, &caps[1])
+/// Convert `<ac:plain-text-body>` elements to `<pre>` so that the code
+/// content survives html5ever parsing.
+///
+/// html5ever treats `<![CDATA[...]]>` as a bogus comment (content is lost).
+/// This function must run **before** `rewrite_macros()` so the protected
+/// content is not altered by later regex passes.
+///
+/// Known limitation: CDATA sequences split with `]]]]><![CDATA[>` are not
+/// supported.
+fn rewrite_plain_text_bodies(html: &str) -> String {
+    // Pass 1: CDATA variant — content is raw text, needs full HTML escaping.
+    let s = plain_text_body_cdata_re()
+        .replace_all(html, |caps: &regex::Captures| {
+            let content = escape_html_text(&caps[1]);
+            // The leading '\n' is intentional: html5ever eats the first newline
+            // immediately after a <pre> open tag per the HTML5 spec.  Our
+            // artificial newline is consumed, leaving the real content intact.
+            format!("<pre class=\"ac-plain-text-body\">\n{content}</pre>")
         })
         .into_owned();
 
-    let s = s.replace("</ac:structured-macro>", "</div>");
+    // Pass 2: non-CDATA variant — content is already entity-encoded.
+    ac_plain_text_body_re()
+        .replace_all(&s, |caps: &regex::Captures| {
+            if caps[0].starts_with("</") {
+                "</pre>".to_string()
+            } else {
+                "<pre class=\"ac-plain-text-body\">\n".to_string()
+            }
+        })
+        .into_owned()
+}
 
-    // ac:image → [image]
+/// Rewrite every `<ac:structured-macro>` into an HTML `<div>` (or `<span>`
+/// for inline macros), lifting `<ac:parameter>` children into `data-macro-param-*`
+/// attributes.
+///
+/// The scanner finds the next opening or closing macro tag from the current
+/// cursor position and processes whichever comes first, so nested macros
+/// (e.g. expand containing code) are handled correctly via a div/span stack.
+///
+/// Known limitation: parameter values that themselves contain the literal
+/// string `<ac:structured-macro` are not supported (extremely rare in practice).
+fn rewrite_macros(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() + html.len() / 4);
+    let mut cursor = 0;
+    // Stack tracks what kind of element (div/span) was opened at each nesting
+    // level so the matching close tag can be emitted.
+    let mut stack: Vec<&'static str> = Vec::new();
+
+    loop {
+        let rest = &html[cursor..];
+        let open_pos = rest.find("<ac:structured-macro").map(|p| cursor + p);
+        let close_pos = rest.find("</ac:structured-macro>").map(|p| cursor + p);
+
+        match (open_pos, close_pos) {
+            (None, None) => {
+                out.push_str(&html[cursor..]);
+                break;
+            }
+            (Some(op), None) => {
+                // No close tags remain. Process the open tag if it is
+                // self-closing; otherwise copy the rest and stop.
+                let Some(rel_gt) = html[op..].find('>') else {
+                    out.push_str(&html[cursor..]);
+                    break;
+                };
+                let tag_end = op + rel_gt + 1;
+                let open_tag = &html[op..tag_end];
+
+                let is_self_closing = open_tag.ends_with("/>")
+                    || open_tag
+                        .get(..open_tag.len().saturating_sub(1))
+                        .is_some_and(|s| s.trim_end().ends_with('/'));
+
+                if !is_self_closing {
+                    out.push_str(&html[cursor..]);
+                    break;
+                }
+
+                out.push_str(&html[cursor..op]);
+
+                let macro_name = macro_open_re()
+                    .captures(open_tag)
+                    .map(|c| c[1].to_string())
+                    .unwrap_or_default();
+
+                // Self-closing macros have no parameter children; calling
+                // consume_params here could accidentally eat stray
+                // <ac:parameter> tags from malformed documents.
+                let kind: &'static str = if INLINE_MACROS.contains(&macro_name.as_str()) {
+                    "span"
+                } else {
+                    "div"
+                };
+
+                let tag = format!(
+                    r#"<{kind} class="ac-macro" data-macro-name="{}"></{kind}>"#,
+                    escape_attr_preserving_entities(&macro_name)
+                );
+                out.push_str(&tag);
+                cursor = tag_end;
+                // Continue the loop — more content may follow.
+            }
+            (None, Some(cp)) => {
+                // Only a close tag remains.
+                out.push_str(&html[cursor..cp]);
+                let kind = stack.pop().unwrap_or("div");
+                out.push_str(if kind == "span" { "</span>" } else { "</div>" });
+                cursor = cp + "</ac:structured-macro>".len();
+            }
+            (Some(op), Some(cp)) if cp < op => {
+                // Close tag comes before the next open tag.
+                out.push_str(&html[cursor..cp]);
+                let kind = stack.pop().unwrap_or("div");
+                out.push_str(if kind == "span" { "</span>" } else { "</div>" });
+                cursor = cp + "</ac:structured-macro>".len();
+            }
+            (Some(op), _) => {
+                // Open tag comes first.
+                out.push_str(&html[cursor..op]);
+
+                let Some(rel_gt) = html[op..].find('>') else {
+                    // Malformed: no closing '>'; copy rest and stop.
+                    out.push_str(&html[cursor..]);
+                    break;
+                };
+                let tag_end = op + rel_gt + 1;
+                let open_tag = &html[op..tag_end];
+
+                let macro_name = macro_open_re()
+                    .captures(open_tag)
+                    .map(|c| c[1].to_string())
+                    .unwrap_or_default();
+
+                let is_self_closing = open_tag.ends_with("/>")
+                    || open_tag
+                        .get(..open_tag.len().saturating_sub(1))
+                        .is_some_and(|s| s.trim_end().ends_with('/'));
+
+                let kind: &'static str = if INLINE_MACROS.contains(&macro_name.as_str()) {
+                    "span"
+                } else {
+                    "div"
+                };
+
+                let mut tag = format!(
+                    r#"<{kind} class="ac-macro" data-macro-name="{}""#,
+                    escape_attr_preserving_entities(&macro_name)
+                );
+
+                if is_self_closing {
+                    // Self-closing macros have no parameter children; skip
+                    // consume_params to avoid eating stray tags from malformed
+                    // documents.
+                    tag.push_str(&format!("></{kind}>"));
+                    out.push_str(&tag);
+                    cursor = tag_end;
+                } else {
+                    let (params, after_params) = consume_params(html, tag_end);
+                    for (k, v) in &params {
+                        tag.push_str(&format!(r#" data-macro-param-{k}="{v}""#));
+                    }
+                    tag.push('>');
+                    out.push_str(&tag);
+                    stack.push(kind);
+                    cursor = after_params;
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn preprocess(html: &str) -> String {
+    // ① CDATA / plain-text-body → <pre> (must be first to protect code from
+    //   later regex passes).
+    let s = rewrite_plain_text_bodies(html);
+
+    // ② <ac:structured-macro> → <div|span class="ac-macro" ...>
+    let s = rewrite_macros(&s);
+
+    // ③ Inline ac: / ri: elements.
     let s = image_re().replace_all(&s, "[image]").into_owned();
-
-    // ri:page → page title as text
     let s = ri_page_re()
         .replace_all(&s, |caps: &regex::Captures| caps[1].to_string())
         .into_owned();
-
-    // ri:attachment → filename
     let s = ri_attachment_re()
         .replace_all(&s, |caps: &regex::Captures| caps[1].to_string())
         .into_owned();
-
-    // ac:link wrappers → pass through content
     let s = ac_link_re().replace_all(&s, "").into_owned();
 
-    // ac:plain-text-body / ac:rich-text-body → pass through content
-    let s = ac_plain_text_body_re().replace_all(&s, "").into_owned();
+    // ④ Strip remaining wrapper tags and any parameters not consumed by
+    //   rewrite_macros (e.g. parameters that appear after the rich-text-body).
     let s = ac_rich_text_body_re().replace_all(&s, "").into_owned();
-
-    // ac:parameter → pass through content
-    let s = ac_parameter_re().replace_all(&s, "").into_owned();
-    let s = ac_default_parameter_re().replace_all(&s, "").into_owned();
+    let s = ac_param_with_content_re().replace_all(&s, "").into_owned();
+    let s = ac_default_param_with_content_re()
+        .replace_all(&s, "")
+        .into_owned();
 
     s
 }
@@ -242,8 +497,7 @@ pub fn html_to_markdown(html: &str, max_chars: usize, language: Option<&str>) ->
     let processed = preprocess(html);
     let document = Html::parse_fragment(&processed);
 
-    let body_sel = Selector::parse("body").unwrap();
-    let root = match document.select(&body_sel).next() {
+    let root = match document.select(body_sel()).next() {
         Some(b) => b,
         None => document.root_element(),
     };
@@ -294,23 +548,20 @@ fn convert_element(elem: ElementRef<'_>, out: &mut String, ctx: &mut Ctx) {
     let tag = elem.value().name();
 
     match tag {
-        // Block wrappers – just recurse
+        // Block wrappers – check for macro attributes first, then recurse.
         "html" | "head" | "body" | "div" | "section" | "article" | "main" | "aside" | "header"
-        | "footer" | "nav" | "span" | "figure" => {
+        | "footer" | "nav" | "figure" => {
             if let Some(name) = elem.value().attr("data-macro-name") {
-                if name == "sv-translation" {
-                    let macro_lang = elem.value().attr("data-macro-language").unwrap_or("");
-                    let should_expand = match &ctx.sv_translation_language {
-                        Some(wanted) => wanted == macro_lang,
-                        None => !ctx.sv_translation_seen,
-                    };
-                    ctx.sv_translation_seen = true;
-                    if should_expand {
-                        convert_children(elem, out, ctx);
-                    }
-                    return;
-                }
-                out.push_str(&format!("\n> [unsupported confluence macro: {}]\n", name));
+                convert_macro(elem, name, out, ctx);
+                return;
+            }
+            convert_children(elem, out, ctx);
+        }
+
+        // Inline elements that may carry macro attributes (status, anchor).
+        "span" => {
+            if let Some(name) = elem.value().attr("data-macro-name") {
+                convert_macro(elem, name, out, ctx);
                 return;
             }
             convert_children(elem, out, ctx);
@@ -386,7 +637,7 @@ fn convert_element(elem: ElementRef<'_>, out: &mut String, ctx: &mut Ctx) {
         // Pre / code block
         "pre" => {
             let inner_code = elem
-                .select(&Selector::parse("code").unwrap())
+                .select(code_sel())
                 .next()
                 .map(|c| c.text().collect::<String>())
                 .unwrap_or_else(|| elem.text().collect::<String>());
@@ -529,16 +780,177 @@ fn convert_element(elem: ElementRef<'_>, out: &mut String, ctx: &mut Ctx) {
     }
 }
 
+// ── Macro dispatcher ──────────────────────────────────────────────────────────
+
+/// Emit a blockquote block from `text`, one `> ` prefix per line.
+fn quote_lines(text: &str, out: &mut String) {
+    for line in text.lines() {
+        out.push_str(&format!("> {}\n", line));
+    }
+}
+
+fn convert_macro(elem: ElementRef<'_>, name: &str, out: &mut String, ctx: &mut Ctx) {
+    match name {
+        // ── Scroll Versions translation block ─────────────────────────────────
+        "sv-translation" => {
+            let macro_lang = elem.value().attr("data-macro-param-language").unwrap_or("");
+            let should_expand = match &ctx.sv_translation_language {
+                Some(wanted) => wanted == macro_lang,
+                None => !ctx.sv_translation_seen,
+            };
+            ctx.sv_translation_seen = true;
+            if should_expand {
+                convert_children(elem, out, ctx);
+            }
+        }
+
+        // ── Expand (collapsible section) ──────────────────────────────────────
+        "expand" => {
+            let title = elem
+                .value()
+                .attr("data-macro-param-title")
+                .filter(|t| !t.is_empty())
+                .unwrap_or("Expand");
+            out.push('\n');
+            out.push_str(&format!("**▸ {}**", title));
+            out.push('\n');
+            convert_children(elem, out, ctx);
+        }
+
+        // ── Code block ────────────────────────────────────────────────────────
+        "code" => {
+            let lang = elem.value().attr("data-macro-param-language").unwrap_or("");
+            let code = elem
+                .select(pre_sel())
+                .next()
+                .map(|p| p.text().collect::<String>())
+                .unwrap_or_else(|| elem.text().collect::<String>());
+            out.push('\n');
+            out.push_str(&format!("```{}\n", lang));
+            out.push_str(&code);
+            if !code.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("```\n");
+        }
+
+        // ── No-format block ───────────────────────────────────────────────────
+        "noformat" => {
+            let code = elem
+                .select(pre_sel())
+                .next()
+                .map(|p| p.text().collect::<String>())
+                .unwrap_or_else(|| elem.text().collect::<String>());
+            out.push('\n');
+            out.push_str("```\n");
+            out.push_str(&code);
+            if !code.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("```\n");
+        }
+
+        // ── Info / Note / Warning / Tip ───────────────────────────────────────
+        "info" | "note" | "warning" | "tip" => {
+            let label = {
+                let mut l = name[..1].to_uppercase();
+                l.push_str(&name[1..]);
+                l
+            };
+            let mut inner = String::new();
+            convert_children(elem, &mut inner, ctx);
+            out.push('\n');
+            out.push_str(&format!("> **{}:**\n", label));
+            quote_lines(inner.trim(), out);
+            out.push('\n');
+        }
+
+        // ── Panel ─────────────────────────────────────────────────────────────
+        "panel" => {
+            let title = elem.value().attr("data-macro-param-title").unwrap_or("");
+            let mut inner = String::new();
+            convert_children(elem, &mut inner, ctx);
+            out.push('\n');
+            if !title.is_empty() {
+                out.push_str(&format!("> **{}**\n", title));
+            }
+            quote_lines(inner.trim(), out);
+            out.push('\n');
+        }
+
+        // ── Status badge (inline) ─────────────────────────────────────────────
+        "status" => {
+            let title = elem.value().attr("data-macro-param-title").unwrap_or("");
+            if !title.is_empty() {
+                out.push_str(&format!("[{}]", title));
+            }
+        }
+
+        // ── Table of contents ─────────────────────────────────────────────────
+        "toc" => {
+            out.push_str("\n[TOC]\n");
+        }
+
+        // ── Anchor (page anchor — no visible output) ──────────────────────────
+        "anchor" => {
+            // Intentionally empty.
+        }
+
+        // ── Cross-page excerpt include ────────────────────────────────────────
+        // We can only fetch the current page; cross-page inclusion is not
+        // possible in this read-only, single-page design.
+        "excerpt-include" | "excerpt-includeplus" => {
+            let page = elem
+                .value()
+                .attr("data-macro-param-default")
+                .or_else(|| elem.value().attr("data-macro-param-page"))
+                .or_else(|| elem.value().attr("data-macro-param-name"))
+                .filter(|s| !s.is_empty())
+                .unwrap_or("unknown page");
+            out.push_str(&format!("\n> [excerpt from: {}]\n", page));
+        }
+
+        // ── Unsupported ───────────────────────────────────────────────────────
+        _ => {
+            // Show any hoisted parameter values as context so that useful
+            // data (e.g. a JIRA ticket key) is not silently dropped.
+            let params: Vec<String> = elem
+                .value()
+                .attrs()
+                .filter(|(k, _)| k.starts_with("data-macro-param-"))
+                .map(|(k, v)| format!("{}: {}", k.trim_start_matches("data-macro-param-"), v))
+                .collect();
+
+            if params.is_empty() {
+                out.push_str(&format!("\n> [unsupported confluence macro: {}]\n", name));
+            } else {
+                out.push_str(&format!(
+                    "\n> [unsupported confluence macro: {} ({})]\n",
+                    name,
+                    params.join(", ")
+                ));
+            }
+
+            // Also render body content if the macro has a rich-text-body.
+            let mut inner = String::new();
+            convert_children(elem, &mut inner, ctx);
+            let inner = inner.trim();
+            if !inner.is_empty() {
+                out.push('\n');
+                quote_lines(inner, out);
+                out.push('\n');
+            }
+        }
+    }
+}
+
 // ── Table renderer ────────────────────────────────────────────────────────────
 
 fn convert_table(table: ElementRef<'_>, out: &mut String, ctx: &mut Ctx) {
-    let row_sel = Selector::parse("tr").unwrap();
-    let cell_sel = Selector::parse("th, td").unwrap();
-
     let rows: Vec<Vec<String>> = table
-        .select(&row_sel)
+        .select(tr_sel())
         .map(|row| {
-            row.select(&cell_sel)
+            row.select(th_td_sel())
                 .map(|cell| {
                     let mut inner = String::new();
                     convert_children(cell, &mut inner, ctx);
@@ -557,8 +969,7 @@ fn convert_table(table: ElementRef<'_>, out: &mut String, ctx: &mut Ctx) {
     let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
 
     // Detect header row (first row uses <th> cells)
-    let header_row_sel = Selector::parse("tr:first-child th").unwrap();
-    let has_header = table.select(&header_row_sel).next().is_some();
+    let has_header = table.select(first_row_th_sel()).next().is_some();
 
     for (i, row) in rows.iter().enumerate() {
         let padded: Vec<String> = (0..ncols)
@@ -650,7 +1061,12 @@ mod tests {
     fn test_macro_placeholder() {
         let html = r#"<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">PROJ-1</ac:parameter></ac:structured-macro>"#;
         let md = html_to_markdown(html, 50_000, None);
-        assert!(md.contains("[unsupported confluence macro: jira]"));
+        // Parameter values are now shown in the placeholder for visibility.
+        assert!(
+            md.contains("[unsupported confluence macro: jira"),
+            "placeholder: {md}"
+        );
+        assert!(md.contains("PROJ-1"), "param value should appear: {md}");
     }
 
     #[test]
@@ -735,5 +1151,271 @@ mod tests {
             "non-matching language should not be expanded"
         );
         assert!(!md.contains("[unsupported confluence macro: sv-translation]"));
+    }
+
+    // ── Expand macro ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_expand_macro_with_title() {
+        let html = r#"<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">Click to expand</ac:parameter>
+  <ac:rich-text-body><p>Hidden content here.</p></ac:rich-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("**▸ Click to expand**"), "title should appear");
+        assert!(
+            md.contains("Hidden content here."),
+            "body should be expanded"
+        );
+        assert!(!md.contains("[unsupported confluence macro: expand]"));
+    }
+
+    #[test]
+    fn test_expand_macro_no_title_uses_default() {
+        let html = r#"<ac:structured-macro ac:name="expand">
+  <ac:rich-text-body><p>Body text.</p></ac:rich-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(
+            md.contains("**▸ Expand**"),
+            "default title 'Expand' should be used"
+        );
+        assert!(md.contains("Body text."));
+    }
+
+    // ── Code macro ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_code_macro_with_language() {
+        let html = r#"<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">rust</ac:parameter>
+  <ac:plain-text-body><![CDATA[fn main() {}]]></ac:plain-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("```rust"), "language fence should appear");
+        assert!(md.contains("fn main() {}"), "code body should appear");
+        assert!(md.contains("```"), "closing fence should appear");
+    }
+
+    #[test]
+    fn test_code_macro_cdata_special_chars() {
+        let html = r#"<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">html</ac:parameter>
+  <ac:plain-text-body><![CDATA[<div class="a" & b>text</div>]]></ac:plain-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(
+            md.contains(r#"<div class="a" & b>text</div>"#),
+            "HTML special chars in CDATA should be preserved: {md}"
+        );
+    }
+
+    #[test]
+    fn test_code_macro_extra_params_do_not_leak() {
+        let html = r#"<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">java</ac:parameter>
+  <ac:parameter ac:name="title">My Snippet</ac:parameter>
+  <ac:parameter ac:name="linenumbers">true</ac:parameter>
+  <ac:plain-text-body><![CDATA[System.out.println("hi");]]></ac:plain-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(
+            !md.contains("My Snippet"),
+            "extra params must not appear in output"
+        );
+        assert!(
+            !md.contains("true"),
+            "linenumbers param must not appear in output"
+        );
+        assert!(md.contains("```java"));
+        assert!(md.contains(r#"System.out.println("hi");"#));
+    }
+
+    // ── Noformat macro ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_noformat_macro() {
+        let html = r#"<ac:structured-macro ac:name="noformat">
+  <ac:plain-text-body><![CDATA[plain text block
+second line]]></ac:plain-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("```\n"), "opening fence without language");
+        assert!(md.contains("plain text block"));
+        assert!(md.contains("second line"));
+    }
+
+    // ── Info / note / warning / tip ───────────────────────────────────────────
+
+    #[test]
+    fn test_info_macro() {
+        let html = r#"<ac:structured-macro ac:name="info">
+  <ac:rich-text-body><p>Important note here.</p></ac:rich-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("> **Info:**"), "Info label should appear");
+        assert!(md.contains("Important note here."), "body should appear");
+        assert!(!md.contains("[unsupported confluence macro: info]"));
+    }
+
+    #[test]
+    fn test_warning_macro() {
+        let html = r#"<ac:structured-macro ac:name="warning">
+  <ac:rich-text-body><p>Danger!</p></ac:rich-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("> **Warning:**"));
+        assert!(md.contains("Danger!"));
+    }
+
+    #[test]
+    fn test_note_and_tip_macros() {
+        let note_md = html_to_markdown(
+            r#"<ac:structured-macro ac:name="note"><ac:rich-text-body><p>A note.</p></ac:rich-text-body></ac:structured-macro>"#,
+            50_000,
+            None,
+        );
+        assert!(note_md.contains("> **Note:**"));
+        let tip_md = html_to_markdown(
+            r#"<ac:structured-macro ac:name="tip"><ac:rich-text-body><p>A tip.</p></ac:rich-text-body></ac:structured-macro>"#,
+            50_000,
+            None,
+        );
+        assert!(tip_md.contains("> **Tip:**"));
+    }
+
+    // ── Panel macro ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_panel_macro_with_title() {
+        let html = r#"<ac:structured-macro ac:name="panel">
+  <ac:parameter ac:name="title">Panel Title</ac:parameter>
+  <ac:rich-text-body><p>Panel body.</p></ac:rich-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("> **Panel Title**"));
+        assert!(md.contains("Panel body."));
+    }
+
+    #[test]
+    fn test_panel_macro_without_title() {
+        let html = r#"<ac:structured-macro ac:name="panel">
+  <ac:rich-text-body><p>No title panel.</p></ac:rich-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("No title panel."));
+        // No title line should appear
+        assert!(!md.contains("> **"));
+    }
+
+    // ── Status macro (inline) ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_status_macro_inline_no_paragraph_break() {
+        // status is a <span> so it must not break the surrounding <p>
+        let html = r#"<p>Status is <ac:structured-macro ac:name="status"><ac:parameter ac:name="title">DONE</ac:parameter></ac:structured-macro> today.</p>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("[DONE]"), "status badge should appear");
+        // The whole paragraph should be on a single (logical) line
+        let lines: Vec<&str> = md.lines().filter(|l| !l.trim().is_empty()).collect();
+        let para_line = lines
+            .iter()
+            .find(|l| l.contains("[DONE]"))
+            .expect("no line with [DONE]");
+        assert!(
+            para_line.contains("Status is"),
+            "surrounding text should be on same line: {para_line}"
+        );
+        assert!(
+            para_line.contains("today."),
+            "trailing text should be on same line: {para_line}"
+        );
+    }
+
+    // ── TOC macro ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_toc_macro() {
+        let html = r#"<ac:structured-macro ac:name="toc" ac:schema-version="1"/>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("[TOC]"));
+        assert!(!md.contains("[unsupported confluence macro: toc]"));
+    }
+
+    // ── Anchor macro ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_anchor_macro_silent() {
+        let html = r#"<p>Before</p><ac:structured-macro ac:name="anchor"><ac:parameter ac:name="default">my-anchor</ac:parameter></ac:structured-macro><p>After</p>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("Before"), "before text should appear");
+        assert!(md.contains("After"), "after text should appear");
+        assert!(!md.contains("my-anchor"), "anchor name should not appear");
+        assert!(!md.contains("[unsupported confluence macro: anchor]"));
+    }
+
+    // ── Excerpt-include macro ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_excerpt_includeplus_placeholder() {
+        // The page reference is in a default parameter containing ac:link/ri:page
+        let html = r#"<ac:structured-macro ac:name="excerpt-includeplus">
+  <ac:default-parameter><ac:link><ri:page ri:content-title="Source Page"/></ac:link></ac:default-parameter>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(
+            md.contains("[excerpt from: Source Page]"),
+            "page name should appear in placeholder: {md}"
+        );
+    }
+
+    // ── Nested macros ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_nested_macro_expand_contains_code() {
+        let html = r#"<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">Show Code</ac:parameter>
+  <ac:rich-text-body>
+    <ac:structured-macro ac:name="code">
+      <ac:parameter ac:name="language">python</ac:parameter>
+      <ac:plain-text-body><![CDATA[print("hello")]]></ac:plain-text-body>
+    </ac:structured-macro>
+  </ac:rich-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("**▸ Show Code**"), "expand title should appear");
+        assert!(md.contains("```python"), "code fence with language");
+        assert!(md.contains(r#"print("hello")"#), "code body should appear");
+    }
+
+    // ── Self-closing macro tag ────────────────────────────────────────────────
+
+    #[test]
+    fn test_self_closing_macro_does_not_swallow_content() {
+        let html = r#"<ac:structured-macro ac:name="toc" ac:schema-version="1"/><p>After TOC</p>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(
+            md.contains("After TOC"),
+            "content after self-closing macro must appear"
+        );
+        assert!(md.contains("[TOC]"));
+    }
+
+    // ── Parameter with special chars ──────────────────────────────────────────
+
+    #[test]
+    fn test_param_value_with_double_quotes() {
+        // title contains a double-quote character (XML-entity-encoded in storage)
+        let html = r#"<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">Say &quot;hello&quot;</ac:parameter>
+  <ac:rich-text-body><p>Body.</p></ac:rich-text-body>
+</ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        // html5ever decodes &quot; back to " when reading the attribute value
+        assert!(
+            md.contains(r#"**▸ Say "hello"**"#) || md.contains("**▸ Say"),
+            "title should appear: {md}"
+        );
+        assert!(md.contains("Body."));
     }
 }
