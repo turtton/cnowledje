@@ -3,7 +3,7 @@ mod cli;
 use clap::Parser;
 use std::collections::{HashMap, HashSet};
 
-use cli::{Cli, Commands, ConfigSubcommand};
+use cli::{Cli, Commands, ConfigSubcommand, SkillSubcommand};
 use cnowledje::client::ConfluenceClient;
 use cnowledje::config::{
     default_config_path, delete_token_from_keyring, load_config, profile_exists, resolve_spaces,
@@ -18,6 +18,7 @@ use cnowledje::format::{
 use cnowledje::markdown;
 use cnowledje::models::SearchResult;
 use cnowledje::models::{PageOutput, SearchOutput, SearchResultOutput, NOTICE};
+use cnowledje::skill;
 use cnowledje::types::{PageFormat, SearchIn};
 
 #[tokio::main]
@@ -62,6 +63,13 @@ async fn main() {
             }
         }
         Commands::Config(args) => match run_config(args).await {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                1
+            }
+        },
+        Commands::Skill(args) => match run_skill(args) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("error: {}", e);
@@ -587,5 +595,29 @@ fn run_config_init(profile: String, force: bool) -> Result<(), ConfluenceError> 
         Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
     }
 
+    Ok(())
+}
+
+// ── skill command ─────────────────────────────────────────────────────────────
+
+fn run_skill(args: cli::SkillArgs) -> Result<(), ConfluenceError> {
+    match args.command {
+        SkillSubcommand::Install { force } => {
+            let skills_dir = skill::default_skills_dir().ok_or_else(|| {
+                ConfluenceError::SkillError(
+                    "cannot determine home directory; set HOME and retry".to_string(),
+                )
+            })?;
+            let (path, outcome) = skill::install_skill(&skills_dir, skill::SKILL_CONTENT, force)?;
+            match outcome {
+                skill::InstallOutcome::Installed | skill::InstallOutcome::Overwritten => {
+                    println!("Installed skill to {}", path.display());
+                }
+                skill::InstallOutcome::AlreadyUpToDate => {
+                    println!("Skill at {} is already up to date.", path.display());
+                }
+            }
+        }
+    }
     Ok(())
 }

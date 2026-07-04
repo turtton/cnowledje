@@ -6,4 +6,5 @@ pub mod error;
 pub mod format;
 pub mod markdown;
 pub mod models;
+pub mod skill;
 pub mod types;

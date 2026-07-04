@@ -48,6 +48,9 @@ pub enum ConfluenceError {
 
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
+
+    #[error("{0}")]
+    SkillError(String),
 }
 
 impl ConfluenceError {
@@ -69,6 +72,7 @@ impl ConfluenceError {
             ConfluenceError::RequestError(_) => "request_error",
             ConfluenceError::UrlError(_) => "url_error",
             ConfluenceError::JsonError(_) => "json_error",
+            ConfluenceError::SkillError(_) => "skill_error",
         }
     }
 }

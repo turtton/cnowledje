@@ -29,6 +29,7 @@ No CI exists yet. Run `cargo fmt && cargo clippy && cargo test` before committin
 | `src/cql.rs` | CQL generation + page ID extraction |
 | `src/markdown.rs` | Confluence storage HTML → Markdown converter |
 | `src/models.rs` | API response types + CLI output types + `NOTICE` constant |
+| `src/skill.rs` | Bundled SKILL.md (`include_str!`) + `install_skill` (writes to `~/.agents/skills`) |
 | `src/types.rs` | `SearchIn`, `PageFormat` enums |
 | `src/error.rs` | `ConfluenceError` enum |
 | `src/format.rs` | Output formatting helpers |
@@ -57,6 +58,8 @@ TOML-only settings (no env var override): `default_limit` (default: 10), `max_li
 Token keyring commands: `cnowledje config token set [--profile <name>]` / `cnowledje config token delete [--profile <name>]`
 
 `cnowledje config check` validates config and makes a live API connectivity check — requires a real Confluence instance to succeed.
+
+`cnowledje skill install [--force]` writes the embedded `confluence-lookup` SKILL.md to `~/.agents/skills/confluence-lookup/SKILL.md`. Use `--force` when upgrading the binary to overwrite an older installed version.
 
 ## Key implementation details
 

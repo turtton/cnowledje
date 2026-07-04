@@ -21,6 +21,31 @@ It will never perform write operations. Please also configure a dedicated servic
 cargo install --path .
 ```
 
+### Agent skill
+
+After installing the binary, deploy the bundled `confluence-lookup` skill so AI
+agents (Claude Code and compatible tools) can invoke `cnowledje` automatically:
+
+```bash
+cnowledje skill install
+```
+
+This writes `~/.agents/skills/confluence-lookup/SKILL.md` from the content
+embedded in the binary at build time.
+
+If the file already exists with different content (e.g. after upgrading
+`cnowledje`), the command aborts to protect any local edits. Pass `--force` to
+overwrite:
+
+```bash
+cnowledje skill install --force   # use after upgrading cnowledje
+```
+
+> **Note on distribution paths:** `apm.yml` deploys the same skill to editor
+> integrations (Copilot, OpenCode) via the `apm` tool during development.
+> `skill install` is the end-user path — it works from any installed binary
+> regardless of whether the source repository is present.
+
 ## Configuration
 
 Set the required environment variables before running:

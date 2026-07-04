@@ -9,7 +9,8 @@ TYPICAL WORKFLOW:
   3. Cite the source (title, URL, last-modified) in your answer.
 
 Run `cnowledje <command> --help` for per-command options and examples.
-See `cnowledje config --help` for configuration and token management.";
+See `cnowledje config --help` for configuration and token management.
+See `cnowledje skill install --help` to install the bundled agent skill.";
 
 // NOTE: The JSON shape documented below must be kept in sync with SearchOutput / SearchResultOutput
 // in src/models.rs. Update both when the output types change.
@@ -88,6 +89,8 @@ pub enum Commands {
     Page(PageArgs),
     /// Validate and display the current configuration.
     Config(ConfigArgs),
+    /// Manage the bundled agent skill.
+    Skill(SkillArgs),
 }
 
 // ── search ────────────────────────────────────────────────────────────────────
@@ -158,6 +161,41 @@ impl PageArgs {
             self.format.clone()
         }
     }
+}
+
+// ── skill ─────────────────────────────────────────────────────────────────────
+
+const SKILL_AFTER_HELP: &str = "\
+EXAMPLES:
+  # Install to the default location (~/.agents/skills/confluence-lookup/SKILL.md)
+  cnowledje skill install
+
+  # Overwrite an existing file (e.g. after upgrading cnowledje)
+  cnowledje skill install --force
+
+NOTES:
+  * The SKILL.md bundled in the binary is embedded at build time.
+  * If ~/.agents/skills/confluence-lookup/SKILL.md already exists with different
+    content, the command aborts with an error to protect local edits.
+    Re-run with --force to overwrite.
+  * After upgrading cnowledje, the embedded SKILL.md may differ from the
+    previously installed file.  Use --force to update it.";
+
+#[derive(Args)]
+#[command(after_long_help = SKILL_AFTER_HELP)]
+pub struct SkillArgs {
+    #[command(subcommand)]
+    pub command: SkillSubcommand,
+}
+
+#[derive(Subcommand)]
+pub enum SkillSubcommand {
+    /// Install the confluence-lookup skill to ~/.agents/skills.
+    Install {
+        /// Overwrite an existing SKILL.md even if the content differs.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 // ── config ────────────────────────────────────────────────────────────────────
