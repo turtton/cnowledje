@@ -40,6 +40,18 @@ pub fn build_text_cql(spaces: &[String], query: &str) -> String {
     )
 }
 
+/// Build a CQL query that matches a page by exact title within one space.
+///
+/// Used to resolve an `excerpt-include` page reference (title + optional
+/// space) to an ID, since the storage format never carries one directly.
+pub fn build_exact_title_cql(space: &str, title: &str) -> String {
+    format!(
+        "space = \"{}\" AND type = page AND title = \"{}\"",
+        escape_cql(space),
+        escape_cql(title)
+    )
+}
+
 /// Return the CQL queries needed for the requested [`SearchIn`] mode.
 ///
 /// `Both` returns two queries (title first, text second).
@@ -123,6 +135,15 @@ mod tests {
         assert_eq!(
             cql,
             r#"space = "DEV" AND type = page AND title ~ "Redis" ORDER BY lastmodified DESC"#
+        );
+    }
+
+    #[test]
+    fn test_build_exact_title_cql() {
+        let cql = build_exact_title_cql("DEV", "Source Page");
+        assert_eq!(
+            cql,
+            r#"space = "DEV" AND type = page AND title = "Source Page""#
         );
     }
 

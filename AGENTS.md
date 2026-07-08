@@ -74,7 +74,7 @@ Token keyring commands: `cnowledje config token set [--profile <name>]` / `cnowl
   - `status` → inline `[title]` badge (rendered as `<span>` to avoid breaking paragraphs)
   - `toc` → `[TOC]`
   - `anchor` → silent (no output)
-  - `excerpt-include` / `excerpt-includeplus` → `> [excerpt from: Page Name]` placeholder (cross-page fetch is out of scope)
+  - `excerpt-include` / `excerpt-includeplus` → `> [excerpt from: Page Name]` placeholder (cross-page fetch is out of scope). `run_page` resolves the referenced page's ID via a CQL exact-title search (scoped to `ri:space-key` if present, else the current page's space) and appends it as `(id: 123456)`; falls back silently to title-only on a search miss/error. `markdown::extract_excerpt_refs` + `html_to_markdown_with_excerpt_ids` do the extraction/injection — `html_to_markdown` itself stays a pure, network-free function.
   - `sv-translation` → language-selected expansion (see `--language` flag)
   - All other macros → `[unsupported confluence macro: NAME]`
 - **Content truncation** appends `[content truncated]` when `max_chars` is exceeded; effective limit is `min(--max-chars, config.max_page_chars)`, counted in Unicode chars, not bytes.

@@ -9,7 +9,7 @@ use cnowledje::config::{
     default_config_path, delete_token_from_keyring, load_config, profile_exists, resolve_spaces,
     save_profile_to_path, store_token_in_keyring, validate_spaces, ProfileConfig, TokenSource,
 };
-use cnowledje::cql::{build_text_cql, build_title_cql, extract_page_id};
+use cnowledje::cql::{build_exact_title_cql, build_text_cql, build_title_cql, extract_page_id};
 use cnowledje::error::ConfluenceError;
 use cnowledje::format::{
     make_page_url, print_error_json, print_page_json, print_page_markdown, print_page_plain,
@@ -233,8 +233,54 @@ async fn run_page(args: cli::PageArgs) -> Result<(), ConfluenceError> {
 
     let effective_max = std::cmp::min(args.max_chars, config.max_page_chars);
 
-    let content_markdown =
-        markdown::html_to_markdown(html, effective_max, args.language.as_deref());
+    // Resolve excerpt-include/-includeplus page references (title [+ space])
+    // to page IDs via a CQL title search, since the storage format never
+    // carries an ID for these. Falls back to title-only on any lookup miss.
+    let excerpt_refs = markdown::extract_excerpt_refs(html);
+    let mut resolved_excerpt_ids: HashMap<(String, String), Option<String>> = HashMap::new();
+    for r in &excerpt_refs {
+        if r.title.is_empty() {
+            continue;
+        }
+        let space = r
+            .space_key
+            .clone()
+            .unwrap_or_else(|| page.space.key.clone());
+        let key = (r.title.clone(), space);
+        if resolved_excerpt_ids.contains_key(&key) {
+            continue;
+        }
+        let cql = build_exact_title_cql(&key.1, &key.0);
+        let resolved_id = client
+            .search(&cql, 1)
+            .await
+            .ok()
+            .and_then(|resp| resp.results.into_iter().next().map(|res| res.id));
+        resolved_excerpt_ids.insert(key, resolved_id);
+    }
+    let excerpt_ids: Vec<Option<String>> = excerpt_refs
+        .iter()
+        .map(|r| {
+            if r.title.is_empty() {
+                return None;
+            }
+            let space = r
+                .space_key
+                .clone()
+                .unwrap_or_else(|| page.space.key.clone());
+            resolved_excerpt_ids
+                .get(&(r.title.clone(), space))
+                .cloned()
+                .flatten()
+        })
+        .collect();
+
+    let content_markdown = markdown::html_to_markdown_with_excerpt_ids(
+        html,
+        effective_max,
+        args.language.as_deref(),
+        &excerpt_ids,
+    );
 
     let output = PageOutput {
         id: page.id.clone(),

@@ -36,6 +36,16 @@ fn ri_attachment_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"<ri:attachment[^>]*\bri:filename="([^"]*)"[^>]*/>"#).unwrap())
 }
 
+fn ri_content_title_attr_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"ri:content-title="([^"]*)""#).unwrap())
+}
+
+fn ri_space_key_attr_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"ri:space-key="([^"]*)""#).unwrap())
+}
+
 fn ac_plain_text_body_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"</?ac:plain-text-body[^>]*>").unwrap())
@@ -471,15 +481,28 @@ struct Ctx {
     list_stack: Vec<ListKind>,
     sv_translation_language: Option<String>,
     sv_translation_seen: bool,
+    /// Resolved page IDs for `excerpt-include`/`excerpt-includeplus` macros,
+    /// one per occurrence in document order (see [`extract_excerpt_refs`]).
+    excerpt_ids: Vec<Option<String>>,
+    excerpt_index: usize,
 }
 
 impl Ctx {
-    fn new(language: Option<&str>) -> Self {
+    fn new(language: Option<&str>, excerpt_ids: Vec<Option<String>>) -> Self {
         Self {
             list_stack: Vec::new(),
             sv_translation_language: language.map(str::to_owned),
             sv_translation_seen: false,
+            excerpt_ids,
+            excerpt_index: 0,
         }
+    }
+
+    /// Consume the next resolved excerpt-include page ID, in document order.
+    fn next_excerpt_id(&mut self) -> Option<String> {
+        let id = self.excerpt_ids.get(self.excerpt_index).cloned().flatten();
+        self.excerpt_index += 1;
+        id
     }
 
     fn list_depth(&self) -> usize {
@@ -491,9 +514,89 @@ impl Ctx {
     }
 }
 
+// ── Cross-page excerpt reference extraction ────────────────────────────────────
+
+/// A page referenced by an `excerpt-include`/`excerpt-includeplus` macro.
+///
+/// The Confluence storage format never carries a page ID for `ri:page`
+/// references (only `ri:content-title` and, for cross-space references,
+/// `ri:space-key`), so resolving one requires a separate API lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExcerptRef {
+    pub title: String,
+    pub space_key: Option<String>,
+}
+
+/// Scan raw (pre-conversion) storage HTML for `excerpt-include`/
+/// `excerpt-includeplus` macros and return their referenced page in
+/// document order. Callers can resolve each to a page ID (e.g. via a CQL
+/// title search) and feed the results back into
+/// [`html_to_markdown_with_excerpt_ids`].
+pub fn extract_excerpt_refs(html: &str) -> Vec<ExcerptRef> {
+    let mut refs = Vec::new();
+    let mut cursor = 0;
+
+    while let Some(rel) = html[cursor..].find("<ac:structured-macro") {
+        let open_pos = cursor + rel;
+        let Some(rel_gt) = html[open_pos..].find('>') else {
+            break;
+        };
+        let tag_end = open_pos + rel_gt + 1;
+        let open_tag = &html[open_pos..tag_end];
+
+        let is_excerpt = macro_open_re()
+            .captures(open_tag)
+            .is_some_and(|c| matches!(&c[1], "excerpt-include" | "excerpt-includeplus"));
+
+        let close_tag = "</ac:structured-macro>";
+        let (body, next_cursor) = match html[tag_end..].find(close_tag) {
+            Some(r) => (&html[tag_end..tag_end + r], tag_end + r + close_tag.len()),
+            None => (&html[tag_end..], html.len()),
+        };
+
+        if is_excerpt {
+            // Always push exactly one entry per excerpt-include occurrence
+            // (even on extraction failure) so this list stays positionally
+            // aligned with the `next_excerpt_id()` calls made while walking
+            // the converted DOM in `convert_macro`.
+            let page_tag = body
+                .find("<ri:page")
+                .and_then(|page_rel| body[page_rel..].find('>').map(|g| (page_rel, g)))
+                .map(|(page_rel, page_gt)| &body[page_rel..page_rel + page_gt + 1]);
+
+            let title = page_tag
+                .and_then(|t| ri_content_title_attr_re().captures(t))
+                .map(|c| c[1].to_string())
+                .unwrap_or_default();
+            let space_key = page_tag
+                .and_then(|t| ri_space_key_attr_re().captures(t))
+                .map(|c| c[1].to_string());
+
+            refs.push(ExcerptRef { title, space_key });
+        }
+
+        cursor = next_cursor;
+    }
+
+    refs
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub fn html_to_markdown(html: &str, max_chars: usize, language: Option<&str>) -> String {
+    html_to_markdown_with_excerpt_ids(html, max_chars, language, &[])
+}
+
+/// Like [`html_to_markdown`], but injects already-resolved page IDs into
+/// `excerpt-include`/`excerpt-includeplus` placeholders. `excerpt_ids` must
+/// line up positionally with [`extract_excerpt_refs`] run over the same
+/// `html`; `None` (or a short slice) falls back to the title-only placeholder.
+pub fn html_to_markdown_with_excerpt_ids(
+    html: &str,
+    max_chars: usize,
+    language: Option<&str>,
+    excerpt_ids: &[Option<String>],
+) -> String {
     let processed = preprocess(html);
     let document = Html::parse_fragment(&processed);
 
@@ -503,7 +606,7 @@ pub fn html_to_markdown(html: &str, max_chars: usize, language: Option<&str>) ->
     };
 
     let mut out = String::new();
-    let mut ctx = Ctx::new(language);
+    let mut ctx = Ctx::new(language, excerpt_ids.to_vec());
     convert_children(root, &mut out, &mut ctx);
 
     let trimmed = collapse_blank_lines(out.trim());
@@ -907,7 +1010,10 @@ fn convert_macro(elem: ElementRef<'_>, name: &str, out: &mut String, ctx: &mut C
                 .or_else(|| elem.value().attr("data-macro-param-name"))
                 .filter(|s| !s.is_empty())
                 .unwrap_or("unknown page");
-            out.push_str(&format!("\n> [excerpt from: {}]\n", page));
+            match ctx.next_excerpt_id() {
+                Some(id) => out.push_str(&format!("\n> [excerpt from: {} (id: {})]\n", page, id)),
+                None => out.push_str(&format!("\n> [excerpt from: {}]\n", page)),
+            }
         }
 
         // ── Unsupported ───────────────────────────────────────────────────────
@@ -1367,6 +1473,76 @@ second line]]></ac:plain-text-body>
             md.contains("[excerpt from: Source Page]"),
             "page name should appear in placeholder: {md}"
         );
+    }
+
+    #[test]
+    fn test_extract_excerpt_refs_title_and_space() {
+        let html = r#"<ac:structured-macro ac:name="excerpt-include">
+  <ac:default-parameter><ac:link><ri:page ri:space-key="DEV" ri:content-title="Source Page"/></ac:link></ac:default-parameter>
+</ac:structured-macro>"#;
+        let refs = extract_excerpt_refs(html);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].title, "Source Page");
+        assert_eq!(refs[0].space_key.as_deref(), Some("DEV"));
+    }
+
+    #[test]
+    fn test_extract_excerpt_refs_no_space_key() {
+        let html = r#"<ac:structured-macro ac:name="excerpt-includeplus">
+  <ac:default-parameter><ac:link><ri:page ri:content-title="Source Page"/></ac:link></ac:default-parameter>
+</ac:structured-macro>"#;
+        let refs = extract_excerpt_refs(html);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].title, "Source Page");
+        assert_eq!(refs[0].space_key, None);
+    }
+
+    #[test]
+    fn test_extract_excerpt_refs_ignores_other_macros() {
+        let html = r#"<ac:structured-macro ac:name="info"><ac:rich-text-body><p>hi</p></ac:rich-text-body></ac:structured-macro>"#;
+        assert!(extract_excerpt_refs(html).is_empty());
+    }
+
+    #[test]
+    fn test_excerpt_include_with_resolved_id() {
+        let html = r#"<ac:structured-macro ac:name="excerpt-include">
+  <ac:default-parameter><ac:link><ri:page ri:content-title="Source Page"/></ac:link></ac:default-parameter>
+</ac:structured-macro>"#;
+        let md =
+            html_to_markdown_with_excerpt_ids(html, 50_000, None, &[Some("123456".to_string())]);
+        assert!(
+            md.contains("[excerpt from: Source Page (id: 123456)]"),
+            "resolved id should appear in placeholder: {md}"
+        );
+    }
+
+    #[test]
+    fn test_excerpt_include_falls_back_to_title_when_unresolved() {
+        let html = r#"<ac:structured-macro ac:name="excerpt-include">
+  <ac:default-parameter><ac:link><ri:page ri:content-title="Source Page"/></ac:link></ac:default-parameter>
+</ac:structured-macro>"#;
+        let md = html_to_markdown_with_excerpt_ids(html, 50_000, None, &[None]);
+        assert!(
+            md.contains("[excerpt from: Source Page]"),
+            "unresolved lookup should fall back to title-only: {md}"
+        );
+        assert!(!md.contains("id:"));
+    }
+
+    #[test]
+    fn test_excerpt_include_id_index_survives_missing_ref() {
+        // Two excerpt-include macros; excerpt_ids has one entry per
+        // occurrence, so the second one's id must line up correctly.
+        let html = r#"<ac:structured-macro ac:name="excerpt-include">
+  <ac:default-parameter><ac:link><ri:page ri:content-title="First"/></ac:link></ac:default-parameter>
+</ac:structured-macro>
+<ac:structured-macro ac:name="excerpt-includeplus">
+  <ac:default-parameter><ac:link><ri:page ri:content-title="Second"/></ac:link></ac:default-parameter>
+</ac:structured-macro>"#;
+        let md =
+            html_to_markdown_with_excerpt_ids(html, 50_000, None, &[None, Some("999".to_string())]);
+        assert!(md.contains("[excerpt from: First]"));
+        assert!(md.contains("[excerpt from: Second (id: 999)]"));
     }
 
     // ── Nested macros ─────────────────────────────────────────────────────────
