@@ -1,5 +1,7 @@
 use crate::error::ConfluenceError;
-use crate::models::{ErrorDetail, ErrorOutput, PageOutput, SearchOutput};
+use crate::models::{
+    ErrorDetail, ErrorOutput, JiraIssueOutput, JiraSearchOutput, PageOutput, SearchOutput,
+};
 
 // ── Search output ─────────────────────────────────────────────────────────────
 
@@ -109,4 +111,137 @@ pub fn make_page_url(base_url: &str, api_base: Option<&str>, webui: Option<&str>
         Some(rel) => format!("{}{}", base, rel),
         None => base.to_string(),
     }
+}
+
+// ── Jira search output ────────────────────────────────────────────────────────
+
+/// Print Jira search results as pretty JSON.
+pub fn print_jira_search_json(output: &JiraSearchOutput) -> Result<(), ConfluenceError> {
+    println!("{}", serde_json::to_string_pretty(output)?);
+    Ok(())
+}
+
+/// Print Jira search results in human-readable form.
+pub fn print_jira_search_human(output: &JiraSearchOutput) {
+    match &output.query {
+        Some(q) => println!(
+            "Search: \"{}\" in projects [{}]",
+            q,
+            output.projects.join(", ")
+        ),
+        None => println!(
+            "Search: (filters only) in projects [{}]",
+            output.projects.join(", ")
+        ),
+    }
+    println!("JQL   : {}", output.jql);
+    println!("Results: {} (total {})", output.results.len(), output.total);
+    println!("{}", "─".repeat(72));
+
+    for (i, r) in output.results.iter().enumerate() {
+        println!("{:>3}. {} — {}", i + 1, r.key, r.summary);
+        if let Some(status) = &r.status {
+            println!("     Status  : {}", status);
+        }
+        if let Some(issue_type) = &r.issue_type {
+            println!("     Type    : {}", issue_type);
+        }
+        if let Some(assignee) = &r.assignee {
+            println!("     Assignee: {}", assignee);
+        }
+        if let Some(updated) = &r.updated {
+            println!("     Updated : {}", updated);
+        }
+        println!("     URL     : {}", r.url);
+        println!();
+    }
+}
+
+// ── Jira issue output ─────────────────────────────────────────────────────────
+
+/// Print a Jira issue as pretty JSON.
+pub fn print_jira_issue_json(output: &JiraIssueOutput) -> Result<(), ConfluenceError> {
+    println!("{}", serde_json::to_string_pretty(output)?);
+    Ok(())
+}
+
+/// Print a Jira issue's Markdown content (description + comments) with a
+/// brief metadata header.
+pub fn print_jira_issue_markdown(output: &JiraIssueOutput) {
+    println!("<!-- Notice: {} -->", output.notice);
+    println!(
+        "<!-- Key: {} | Project: {} -->",
+        output.key,
+        output.project_key.as_deref().unwrap_or("-")
+    );
+    println!("<!-- URL: {} -->", output.url);
+    if let Some(ts) = &output.updated {
+        println!("<!-- Last updated: {} -->", ts);
+    }
+    println!();
+    println!("# {}: {}", output.key, output.summary);
+    println!();
+    if let Some(status) = &output.status {
+        println!("- Status: {}", status);
+    }
+    if let Some(issue_type) = &output.issue_type {
+        println!("- Type: {}", issue_type);
+    }
+    if let Some(priority) = &output.priority {
+        println!("- Priority: {}", priority);
+    }
+    if let Some(assignee) = &output.assignee {
+        println!("- Assignee: {}", assignee);
+    }
+    if let Some(reporter) = &output.reporter {
+        println!("- Reporter: {}", reporter);
+    }
+    if !output.labels.is_empty() {
+        println!("- Labels: {}", output.labels.join(", "));
+    }
+    println!();
+    println!("## Description");
+    println!();
+    println!("{}", output.description_markdown);
+
+    if !output.comments.is_empty() {
+        println!();
+        println!("## Comments ({})", output.comments.len());
+        for c in &output.comments {
+            println!();
+            println!(
+                "### {} ({})",
+                c.author.as_deref().unwrap_or("(unknown)"),
+                c.created.as_deref().unwrap_or("(unknown)")
+            );
+            println!();
+            println!("{}", c.body_markdown);
+        }
+    }
+
+    if output.omitted_comments > 0 {
+        println!();
+        println!("[{} more comments truncated]", output.omitted_comments);
+    }
+}
+
+/// Print plain text: description followed by comment bodies, no header.
+pub fn print_jira_issue_plain(output: &JiraIssueOutput) {
+    println!("{}", output.description_markdown);
+    for c in &output.comments {
+        println!();
+        println!("{}", c.body_markdown);
+    }
+    if output.omitted_comments > 0 {
+        println!();
+        println!("[{} more comments truncated]", output.omitted_comments);
+    }
+}
+
+// ── Jira URL helpers ──────────────────────────────────────────────────────────
+
+/// Build a full issue URL from the Jira base_url and issue key:
+/// `{base_url}/browse/{key}`.
+pub fn make_issue_url(base_url: &str, key: &str) -> String {
+    format!("{}/browse/{}", base_url.trim_end_matches('/'), key)
 }

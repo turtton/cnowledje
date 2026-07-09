@@ -611,17 +611,23 @@ pub fn html_to_markdown_with_excerpt_ids(
 
     let trimmed = collapse_blank_lines(out.trim());
 
-    if trimmed.chars().count() > max_chars {
+    truncate_with_marker(&trimmed, max_chars)
+}
+
+/// Truncate `s` to at most `max_chars` Unicode chars, appending a
+/// `[content truncated]` marker when truncation occurs.
+fn truncate_with_marker(s: &str, max_chars: usize) -> String {
+    if s.chars().count() > max_chars {
         let mut byte_pos = 0;
-        for (char_count, c) in trimmed.chars().enumerate() {
+        for (char_count, c) in s.chars().enumerate() {
             if char_count >= max_chars {
                 break;
             }
             byte_pos += c.len_utf8();
         }
-        format!("{}\n\n[content truncated]", &trimmed[..byte_pos])
+        format!("{}\n\n[content truncated]", &s[..byte_pos])
     } else {
-        trimmed
+        s.to_string()
     }
 }
 
@@ -1113,6 +1119,78 @@ fn collapse_blank_lines(s: &str) -> String {
     result.trim_end().to_string()
 }
 
+// ── Jira issue rendering ──────────────────────────────────────────────────────
+
+/// One comment's rendering inputs: HTML body from `renderedFields` is
+/// preferred; `body_raw` (Jira wiki markup) is the fallback when the
+/// rendered comment is missing or its index doesn't line up.
+pub struct IssueCommentSource {
+    pub author: Option<String>,
+    pub created: Option<String>,
+    pub body_html: Option<String>,
+    pub body_raw: Option<String>,
+}
+
+pub struct RenderedIssue {
+    pub description_markdown: String,
+    pub comments: Vec<crate::models::JiraCommentOutput>,
+    pub omitted_comments: u32,
+}
+
+/// Render a Jira issue's description and comments into Markdown under a
+/// single shared character budget (`max_chars`): the description is
+/// rendered first, then comments in order until the budget runs out. HTML
+/// input (from `expand=renderedFields`) is preferred; raw Jira wiki markup
+/// is truncated as plain text when no rendered HTML is available.
+/// `language` is always `None` since `sv-translation` is a Confluence-only
+/// macro.
+pub fn render_issue_content(
+    description_html: Option<&str>,
+    description_raw: Option<&str>,
+    comments: &[IssueCommentSource],
+    max_chars: usize,
+) -> RenderedIssue {
+    let mut remaining = max_chars;
+
+    let description_markdown = render_issue_text(description_html, description_raw, remaining);
+    remaining = remaining.saturating_sub(description_markdown.chars().count());
+
+    let mut rendered_comments = Vec::with_capacity(comments.len());
+    let mut omitted_comments = 0u32;
+
+    for (i, c) in comments.iter().enumerate() {
+        if remaining == 0 {
+            omitted_comments = (comments.len() - i) as u32;
+            break;
+        }
+        let body = render_issue_text(c.body_html.as_deref(), c.body_raw.as_deref(), remaining);
+        remaining = remaining.saturating_sub(body.chars().count());
+        rendered_comments.push(crate::models::JiraCommentOutput {
+            author: c.author.clone(),
+            created: c.created.clone(),
+            body_markdown: body,
+        });
+    }
+
+    RenderedIssue {
+        description_markdown,
+        comments: rendered_comments,
+        omitted_comments,
+    }
+}
+
+/// Shared HTML-preferred/raw-fallback rendering rule used for both the
+/// issue description and each comment body.
+fn render_issue_text(html: Option<&str>, raw: Option<&str>, max_chars: usize) -> String {
+    match html {
+        Some(html) if !html.trim().is_empty() => html_to_markdown(html, max_chars, None),
+        _ => match raw {
+            Some(raw) => truncate_with_marker(raw.trim(), max_chars),
+            None => String::new(),
+        },
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1593,5 +1671,143 @@ second line]]></ac:plain-text-body>
             "title should appear: {md}"
         );
         assert!(md.contains("Body."));
+    }
+
+    // ── render_issue_content ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_render_issue_content_within_budget_all_comments_included() {
+        let comments = vec![
+            IssueCommentSource {
+                author: Some("alice".to_string()),
+                created: Some("2024-01-01T00:00:00Z".to_string()),
+                body_html: Some("<p>First comment</p>".to_string()),
+                body_raw: None,
+            },
+            IssueCommentSource {
+                author: Some("bob".to_string()),
+                created: Some("2024-01-02T00:00:00Z".to_string()),
+                body_html: None,
+                body_raw: Some("Second comment as raw text".to_string()),
+            },
+        ];
+
+        let rendered = render_issue_content(
+            Some("<p>Issue <strong>description</strong> here.</p>"),
+            None,
+            &comments,
+            10_000,
+        );
+
+        assert_eq!(rendered.omitted_comments, 0);
+        assert_eq!(rendered.comments.len(), 2);
+        assert!(
+            rendered.description_markdown.contains("**description**"),
+            "description should be HTML->Markdown converted: {}",
+            rendered.description_markdown
+        );
+
+        // Original order preserved, fields copied through unchanged.
+        assert_eq!(rendered.comments[0].author, Some("alice".to_string()));
+        assert_eq!(
+            rendered.comments[0].created,
+            Some("2024-01-01T00:00:00Z".to_string())
+        );
+        assert!(rendered.comments[0].body_markdown.contains("First comment"));
+
+        assert_eq!(rendered.comments[1].author, Some("bob".to_string()));
+        assert_eq!(
+            rendered.comments[1].created,
+            Some("2024-01-02T00:00:00Z".to_string())
+        );
+        assert!(rendered.comments[1]
+            .body_markdown
+            .contains("Second comment as raw text"));
+    }
+
+    #[test]
+    fn test_render_issue_content_budget_exhausted_omits_trailing_comments() {
+        // A description long enough that html_to_markdown truncates it,
+        // guaranteeing the remaining budget saturates to 0 before any
+        // comment is considered.
+        let description_html = format!("<p>{}</p>", "A".repeat(50));
+        let comments = vec![
+            IssueCommentSource {
+                author: Some("alice".to_string()),
+                created: None,
+                body_html: Some("<p>Comment one</p>".to_string()),
+                body_raw: None,
+            },
+            IssueCommentSource {
+                author: Some("bob".to_string()),
+                created: None,
+                body_html: Some("<p>Comment two</p>".to_string()),
+                body_raw: None,
+            },
+            IssueCommentSource {
+                author: Some("carol".to_string()),
+                created: None,
+                body_html: Some("<p>Comment three</p>".to_string()),
+                body_raw: None,
+            },
+        ];
+
+        let rendered = render_issue_content(Some(&description_html), None, &comments, 10);
+
+        assert!(rendered.omitted_comments > 0);
+        assert_eq!(
+            rendered.comments.len() + rendered.omitted_comments as usize,
+            comments.len(),
+            "every comment must be either rendered or counted as omitted"
+        );
+    }
+
+    #[test]
+    fn test_render_issue_content_description_falls_back_to_raw_when_html_absent() {
+        let raw = "  Raw description text that is quite long indeed exceeding budget  ";
+        let rendered = render_issue_content(None, Some(raw), &[], 10);
+
+        // No HTML at all: the raw text is trimmed and truncated exactly like
+        // html_to_markdown's own truncation rule.
+        assert_eq!(
+            rendered.description_markdown,
+            truncate_with_marker(raw.trim(), 10)
+        );
+        assert!(rendered
+            .description_markdown
+            .contains("[content truncated]"));
+    }
+
+    #[test]
+    fn test_render_issue_content_description_falls_back_to_raw_when_html_empty_string() {
+        // An empty (not None) HTML string does not count as "has HTML".
+        let rendered = render_issue_content(Some(""), Some("Fallback raw text"), &[], 10_000);
+
+        assert_eq!(rendered.description_markdown, "Fallback raw text");
+    }
+
+    #[test]
+    fn test_render_issue_content_all_empty() {
+        let rendered = render_issue_content(None, None, &[], 100);
+
+        assert_eq!(rendered.description_markdown, "");
+        assert!(rendered.comments.is_empty());
+        assert_eq!(rendered.omitted_comments, 0);
+    }
+
+    #[test]
+    fn test_render_issue_content_comment_empty_html_string_falls_back_to_raw() {
+        let comments = vec![IssueCommentSource {
+            author: Some("dave".to_string()),
+            created: Some("2024-03-03T00:00:00Z".to_string()),
+            body_html: Some(String::new()),
+            body_raw: Some("Plain fallback text".to_string()),
+        }];
+
+        let rendered = render_issue_content(None, None, &comments, 10_000);
+
+        assert_eq!(rendered.omitted_comments, 0);
+        assert_eq!(rendered.comments.len(), 1);
+        assert_eq!(rendered.comments[0].body_markdown, "Plain fallback text");
     }
 }

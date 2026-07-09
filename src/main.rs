@@ -6,20 +6,29 @@ use std::collections::{HashMap, HashSet};
 use cli::{Cli, Commands, ConfigSubcommand, SkillSubcommand};
 use cnowledje::client::ConfluenceClient;
 use cnowledje::config::{
-    default_config_path, delete_token_from_keyring, load_config, profile_exists, resolve_spaces,
-    save_profile_to_path, store_token_in_keyring, validate_spaces, ProfileConfig, TokenSource,
+    default_config_path, delete_jira_token_from_keyring, delete_token_from_keyring, load_config,
+    load_jira_config, profile_exists, resolve_projects, resolve_spaces, save_profile_to_path,
+    store_jira_token_in_keyring, store_token_in_keyring, validate_projects, validate_spaces,
+    ProfileConfig, TokenSource,
 };
 use cnowledje::cql::{build_exact_title_cql, build_text_cql, build_title_cql, extract_page_id};
 use cnowledje::error::ConfluenceError;
 use cnowledje::format::{
-    make_page_url, print_error_json, print_page_json, print_page_markdown, print_page_plain,
+    make_issue_url, make_page_url, print_error_json, print_jira_issue_json,
+    print_jira_issue_markdown, print_jira_issue_plain, print_jira_search_human,
+    print_jira_search_json, print_page_json, print_page_markdown, print_page_plain,
     print_page_storage_html, print_search_human, print_search_json,
 };
+use cnowledje::jira_client::JiraClient;
+use cnowledje::jql::{build_search_jql, extract_issue_key, JqlFilters};
 use cnowledje::markdown;
 use cnowledje::models::SearchResult;
-use cnowledje::models::{PageOutput, SearchOutput, SearchResultOutput, NOTICE};
+use cnowledje::models::{
+    JiraIssueOutput, JiraSearchOutput, JiraSearchResultOutput, PageOutput, SearchOutput,
+    SearchResultOutput, JIRA_NOTICE, NOTICE,
+};
 use cnowledje::skill;
-use cnowledje::types::{PageFormat, SearchIn};
+use cnowledje::types::{IssueFormat, PageFormat, SearchIn};
 
 #[tokio::main]
 async fn main() {
@@ -74,6 +83,36 @@ async fn main() {
             Err(e) => {
                 eprintln!("error: {}", e);
                 1
+            }
+        },
+        Commands::Jira(args) => match args.command {
+            cli::JiraSubcommand::Search(a) => {
+                let json = a.json;
+                match run_jira_search(a).await {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        if json {
+                            print_error_json(&e);
+                        } else {
+                            eprintln!("error: {}", e);
+                        }
+                        1
+                    }
+                }
+            }
+            cli::JiraSubcommand::Issue(a) => {
+                let json = a.json || a.format == IssueFormat::Json;
+                match run_jira_issue(a).await {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        if json {
+                            print_error_json(&e);
+                        } else {
+                            eprintln!("error: {}", e);
+                        }
+                        1
+                    }
+                }
             }
         },
     };
@@ -302,50 +341,302 @@ async fn run_page(args: cli::PageArgs) -> Result<(), ConfluenceError> {
     Ok(())
 }
 
+// ── jira search command ──────────────────────────────────────────────────────
+
+async fn run_jira_search(args: cli::JiraSearchArgs) -> Result<(), ConfluenceError> {
+    let config = load_jira_config(args.profile.as_deref())?;
+
+    if args.limit > config.max_limit {
+        return Err(ConfluenceError::LimitExceeded {
+            requested: args.limit,
+            max: config.max_limit,
+        });
+    }
+
+    let projects = resolve_projects(args.projects, &config)?;
+    validate_projects(&projects, &config)?;
+
+    let filters = JqlFilters {
+        statuses: &args.status,
+        assignee: args.assignee.as_deref(),
+        reporter: args.reporter.as_deref(),
+        issue_types: &args.issue_types,
+        labels: &args.labels,
+    };
+    let query_is_empty = args
+        .query
+        .as_deref()
+        .map(|q| q.trim().is_empty())
+        .unwrap_or(true);
+    if query_is_empty && filters.is_empty() {
+        return Err(ConfluenceError::NoSearchCriteria);
+    }
+
+    let jql = build_search_jql(&projects, args.query.as_deref(), &filters);
+
+    let client = JiraClient::new(&config.base_url, &config.api_path, &config.token)?;
+    let response = client.search(&jql, args.limit).await?;
+
+    let results: Vec<JiraSearchResultOutput> = response
+        .issues
+        .iter()
+        .map(|issue| {
+            let f = &issue.fields;
+            JiraSearchResultOutput {
+                key: issue.key.clone(),
+                summary: f.summary.clone().unwrap_or_default(),
+                status: f.status.as_ref().map(|s| s.name.clone()),
+                issue_type: f.issuetype.as_ref().map(|t| t.name.clone()),
+                priority: f.priority.as_ref().map(|p| p.name.clone()),
+                assignee: f
+                    .assignee
+                    .as_ref()
+                    .and_then(|u| u.display_name.clone().or_else(|| u.name.clone())),
+                project_key: f.project.as_ref().map(|p| p.key.clone()),
+                url: make_issue_url(&config.base_url, &issue.key),
+                updated: f.updated.clone(),
+            }
+        })
+        .collect();
+
+    let output = JiraSearchOutput {
+        query: args.query.clone(),
+        projects,
+        jql,
+        total: response.total,
+        results,
+    };
+
+    if args.json {
+        print_jira_search_json(&output)?;
+    } else {
+        print_jira_search_human(&output);
+    }
+
+    Ok(())
+}
+
+// ── jira issue command ───────────────────────────────────────────────────────
+
+async fn run_jira_issue(args: cli::JiraIssueArgs) -> Result<(), ConfluenceError> {
+    let config = load_jira_config(args.profile.as_deref())?;
+    let key = extract_issue_key(&args.issue_key_or_url)?;
+
+    let client = JiraClient::new(&config.base_url, &config.api_path, &config.token)?;
+    let issue = client.get_issue(&key).await?;
+
+    let f = &issue.fields;
+
+    // Comment metadata (author/created) comes from `fields.comment.comments`;
+    // the HTML body comes from `rendered_fields.comment.comments` at the same
+    // index. A missing/out-of-range rendered entry falls back to the raw body.
+    let raw_comments = f
+        .comment
+        .as_ref()
+        .map(|c| c.comments.as_slice())
+        .unwrap_or(&[]);
+    let rendered_comments = issue
+        .rendered_fields
+        .as_ref()
+        .and_then(|rf| rf.comment.as_ref())
+        .map(|c| c.comments.as_slice())
+        .unwrap_or(&[]);
+
+    let comment_sources: Vec<markdown::IssueCommentSource> = raw_comments
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let author = c
+                .author
+                .as_ref()
+                .and_then(|u| u.display_name.clone().or_else(|| u.name.clone()));
+            let body_html = rendered_comments.get(i).and_then(|rc| rc.body.clone());
+            markdown::IssueCommentSource {
+                author,
+                created: c.created.clone(),
+                body_html,
+                body_raw: c.body.clone(),
+            }
+        })
+        .collect();
+
+    let effective_max = std::cmp::min(args.max_chars, config.max_issue_chars);
+    let rendered_desc_html = issue
+        .rendered_fields
+        .as_ref()
+        .and_then(|rf| rf.description.as_deref());
+    let raw_desc = f.description.as_deref();
+
+    let rendered = markdown::render_issue_content(
+        rendered_desc_html,
+        raw_desc,
+        &comment_sources,
+        effective_max,
+    );
+
+    let output = JiraIssueOutput {
+        key: issue.key.clone(),
+        summary: f.summary.clone().unwrap_or_default(),
+        project_key: f.project.as_ref().map(|p| p.key.clone()),
+        status: f.status.as_ref().map(|s| s.name.clone()),
+        issue_type: f.issuetype.as_ref().map(|t| t.name.clone()),
+        priority: f.priority.as_ref().map(|p| p.name.clone()),
+        assignee: f
+            .assignee
+            .as_ref()
+            .and_then(|u| u.display_name.clone().or_else(|| u.name.clone())),
+        reporter: f
+            .reporter
+            .as_ref()
+            .and_then(|u| u.display_name.clone().or_else(|| u.name.clone())),
+        labels: f.labels.clone().unwrap_or_default(),
+        created: f.created.clone(),
+        updated: f.updated.clone(),
+        url: make_issue_url(&config.base_url, &issue.key),
+        description_markdown: rendered.description_markdown,
+        comments: rendered.comments,
+        omitted_comments: rendered.omitted_comments,
+        notice: JIRA_NOTICE,
+    };
+
+    match args.effective_format() {
+        IssueFormat::Json => print_jira_issue_json(&output)?,
+        IssueFormat::Markdown => print_jira_issue_markdown(&output),
+        IssueFormat::Plain => print_jira_issue_plain(&output),
+    }
+
+    Ok(())
+}
+
 // ── config check command ──────────────────────────────────────────────────────
 
 async fn run_config(args: cli::ConfigArgs) -> Result<(), ConfluenceError> {
     match args.command {
         ConfigSubcommand::Check { profile } => {
-            let config = load_config(profile.as_deref())?;
-
             println!("Profile      : {}", profile.as_deref().unwrap_or("default"));
-            println!("base_url     : {}", config.base_url);
-            println!("api_path     : {}", config.api_path);
-            let token_src = match config.token_source {
-                TokenSource::Env => "[from env]",
-                TokenSource::Keyring => "[from keyring]",
-                _ => "[from unknown source]",
-            };
-            println!("token        : {}", token_src);
-            println!(
-                "allowed_spaces : {}",
-                config
-                    .allowed_spaces
-                    .as_ref()
-                    .map(|v| v.join(", "))
-                    .unwrap_or_else(|| "(none – all spaces allowed)".to_string())
-            );
-            println!(
-                "default_space  : {}",
-                config.default_space.as_deref().unwrap_or("(none)")
-            );
-            println!("default_limit  : {}", config.default_limit);
-            println!("max_limit      : {}", config.max_limit);
-            println!("max_page_chars : {}", config.max_page_chars);
+            println!();
+
+            let mut first_err: Option<ConfluenceError> = None;
+            let mut confluence_configured = false;
+            let mut jira_configured = false;
+
+            match load_config(profile.as_deref()) {
+                Ok(config) => {
+                    confluence_configured = true;
+                    println!("Confluence   :");
+                    println!("  base_url       : {}", config.base_url);
+                    println!("  api_path       : {}", config.api_path);
+                    let token_src = match config.token_source {
+                        TokenSource::Env => "[from env]",
+                        TokenSource::Keyring => "[from keyring]",
+                        _ => "[from unknown source]",
+                    };
+                    println!("  token          : {}", token_src);
+                    println!(
+                        "  allowed_spaces : {}",
+                        config
+                            .allowed_spaces
+                            .as_ref()
+                            .map(|v| v.join(", "))
+                            .unwrap_or_else(|| "(none – all spaces allowed)".to_string())
+                    );
+                    println!(
+                        "  default_space  : {}",
+                        config.default_space.as_deref().unwrap_or("(none)")
+                    );
+                    println!("  default_limit  : {}", config.default_limit);
+                    println!("  max_limit      : {}", config.max_limit);
+                    println!("  max_page_chars : {}", config.max_page_chars);
+
+                    print!("  Checking Confluence API connectivity... ");
+                    let check: Result<(), ConfluenceError> = async {
+                        let client = ConfluenceClient::new(
+                            &config.base_url,
+                            &config.api_path,
+                            &config.token,
+                        )?;
+                        client
+                            .search("type = page AND title = \"__confluence_ro_check__\"", 1)
+                            .await?;
+                        Ok(())
+                    }
+                    .await;
+                    match check {
+                        Ok(()) => println!("OK"),
+                        Err(e) => {
+                            println!("FAILED");
+                            first_err.get_or_insert(e);
+                        }
+                    }
+                }
+                Err(ConfluenceError::MissingBaseUrl) => {
+                    println!("Confluence   : (not configured)");
+                }
+                Err(e) => {
+                    confluence_configured = true;
+                    println!("Confluence   : configuration error: {}", e);
+                    first_err.get_or_insert(e);
+                }
+            }
 
             println!();
-            print!("Checking API connectivity... ");
-            let client = ConfluenceClient::new(&config.base_url, &config.api_path, &config.token)?;
-            match client
-                .search("type = page AND title = \"__confluence_ro_check__\"", 1)
-                .await
-            {
-                Ok(_) => println!("OK"),
-                Err(e) => {
-                    println!("FAILED");
-                    return Err(e);
+
+            match load_jira_config(profile.as_deref()) {
+                Ok(config) => {
+                    jira_configured = true;
+                    println!("Jira         :");
+                    println!("  jira_base_url         : {}", config.base_url);
+                    println!("  jira_api_path         : {}", config.api_path);
+                    let token_src = match config.token_source {
+                        TokenSource::Env => "[from env]",
+                        TokenSource::Keyring => "[from keyring]",
+                        _ => "[from unknown source]",
+                    };
+                    println!("  token                 : {}", token_src);
+                    println!(
+                        "  jira_allowed_projects : {}",
+                        config
+                            .allowed_projects
+                            .as_ref()
+                            .map(|v| v.join(", "))
+                            .unwrap_or_else(|| "(none – all projects allowed)".to_string())
+                    );
+                    println!(
+                        "  jira_default_project  : {}",
+                        config.default_project.as_deref().unwrap_or("(none)")
+                    );
+
+                    print!("  Checking Jira API connectivity... ");
+                    let check: Result<(), ConfluenceError> = async {
+                        let client =
+                            JiraClient::new(&config.base_url, &config.api_path, &config.token)?;
+                        client.check_connectivity().await
+                    }
+                    .await;
+                    match check {
+                        Ok(()) => println!("OK"),
+                        Err(e) => {
+                            println!("FAILED");
+                            first_err.get_or_insert(e);
+                        }
+                    }
                 }
+                Err(ConfluenceError::MissingJiraBaseUrl) => {
+                    println!("Jira         : (not configured)");
+                }
+                Err(e) => {
+                    jira_configured = true;
+                    println!("Jira         : configuration error: {}", e);
+                    first_err.get_or_insert(e);
+                }
+            }
+
+            if !confluence_configured && !jira_configured {
+                return Err(ConfluenceError::MissingBaseUrl);
+            }
+
+            if let Some(e) = first_err {
+                return Err(e);
             }
         }
         ConfigSubcommand::Init { profile, force } => {
@@ -361,14 +652,27 @@ async fn run_config(args: cli::ConfigArgs) -> Result<(), ConfluenceError> {
 
 fn run_config_token(args: cli::TokenArgs) -> Result<(), ConfluenceError> {
     use inquire::Password;
-    if std::env::var("CONFLUENCE_TOKEN")
+
+    let jira = match &args.command {
+        cli::TokenSubcommand::Set { jira, .. } => *jira,
+        cli::TokenSubcommand::Delete { jira, .. } => *jira,
+    };
+    let env_var = if jira {
+        "JIRA_TOKEN"
+    } else {
+        "CONFLUENCE_TOKEN"
+    };
+    if std::env::var(env_var)
         .map(|t| !t.trim().is_empty())
         .unwrap_or(false)
     {
-        eprintln!("Note: CONFLUENCE_TOKEN is set and will take precedence over the keyring token.");
+        eprintln!(
+            "Note: {} is set and will take precedence over the keyring token.",
+            env_var
+        );
     }
     match args.command {
-        cli::TokenSubcommand::Set { profile } => {
+        cli::TokenSubcommand::Set { profile, jira } => {
             let profile_name = profile.as_deref().unwrap_or("default");
             let token = Password::new("API Token:")
                 .prompt()
@@ -378,13 +682,29 @@ fn run_config_token(args: cli::TokenArgs) -> Result<(), ConfluenceError> {
                     "Token must not be empty.".to_string(),
                 ));
             }
-            store_token_in_keyring(profile_name, &token)?;
-            println!("Token stored in keyring for profile '{}'.", profile_name);
+            if jira {
+                store_jira_token_in_keyring(profile_name, &token)?;
+                println!(
+                    "Jira token stored in keyring for profile '{}'.",
+                    profile_name
+                );
+            } else {
+                store_token_in_keyring(profile_name, &token)?;
+                println!("Token stored in keyring for profile '{}'.", profile_name);
+            }
         }
-        cli::TokenSubcommand::Delete { profile } => {
+        cli::TokenSubcommand::Delete { profile, jira } => {
             let profile_name = profile.as_deref().unwrap_or("default");
-            delete_token_from_keyring(profile_name)?;
-            println!("Token removed from keyring for profile '{}'.", profile_name);
+            if jira {
+                delete_jira_token_from_keyring(profile_name)?;
+                println!(
+                    "Jira token removed from keyring for profile '{}'.",
+                    profile_name
+                );
+            } else {
+                delete_token_from_keyring(profile_name)?;
+                println!("Token removed from keyring for profile '{}'.", profile_name);
+            }
         }
     }
     Ok(())
@@ -597,6 +917,119 @@ fn run_config_init(profile: String, force: bool) -> Result<(), ConfluenceError> 
             Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
         };
 
+    // Jira (optional)
+    let mut jira_base_url: Option<String> = None;
+    let mut jira_api_path: Option<String> = None;
+    let mut jira_allowed_projects: Option<Vec<String>> = None;
+    let mut jira_default_project: Option<String> = None;
+
+    match Confirm::new("Jira も設定しますか?")
+        .with_default(false)
+        .prompt()
+    {
+        Ok(true) => {
+            let url = match Text::new("Jira Base URL (e.g. https://jira.example.com):")
+                .with_validator(|s: &str| match url::Url::parse(s.trim()) {
+                    Ok(u)
+                        if matches!(u.scheme(), "http" | "https")
+                            && u.host_str().is_some()
+                            && u.username().is_empty()
+                            && u.password().is_none()
+                            && u.query().is_none()
+                            && u.fragment().is_none() =>
+                    {
+                        Ok(Validation::Valid)
+                    }
+                    Ok(_) => Ok(Validation::Invalid(
+                        "http:// または https://host/path 形式の URL を入力してください（認証情報・クエリ不可）"
+                            .into(),
+                    )),
+                    Err(_) => Ok(Validation::Invalid(
+                        "有効な URL を入力してください".into(),
+                    )),
+                })
+                .prompt()
+            {
+                Ok(v) => v.trim().to_string(),
+                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                    println!("\nキャンセルされました");
+                    return Ok(());
+                }
+                Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+            };
+
+            let path = match Text::new("Jira API path:")
+                .with_default("/rest/api/2")
+                .with_validator(|s: &str| {
+                    let t = s.trim();
+                    if t.is_empty() {
+                        Ok(Validation::Invalid("API パスを入力してください".into()))
+                    } else if !t.starts_with('/') {
+                        Ok(Validation::Invalid("API パスは / で始めてください".into()))
+                    } else {
+                        Ok(Validation::Valid)
+                    }
+                })
+                .prompt()
+            {
+                Ok(v) => v.trim().to_string(),
+                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                    println!("\nキャンセルされました");
+                    return Ok(());
+                }
+                Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+            };
+
+            let allowed: Option<Vec<String>> =
+                match Text::new("Allowed projects (comma-separated — leave blank to allow all):")
+                    .prompt_skippable()
+                {
+                    Ok(Some(s)) => {
+                        let projects: Vec<String> = s
+                            .split(',')
+                            .map(|k| k.trim().to_string())
+                            .filter(|k| !k.is_empty())
+                            .collect();
+                        if projects.is_empty() {
+                            None
+                        } else {
+                            Some(projects)
+                        }
+                    }
+                    Ok(None) => None,
+                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                        println!("\nキャンセルされました");
+                        return Ok(());
+                    }
+                    Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+                };
+
+            let default_project: Option<String> =
+                match Text::new("Default project key (optional):").prompt_skippable() {
+                    Ok(Some(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+                    Ok(_) => None,
+                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                        println!("\nキャンセルされました");
+                        return Ok(());
+                    }
+                    Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+                };
+
+            jira_base_url = Some(url);
+            jira_api_path = Some(path);
+            jira_allowed_projects = allowed;
+            jira_default_project = default_project;
+        }
+        Ok(false) => {}
+        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+            println!("\nキャンセルされました");
+            return Ok(());
+        }
+        Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+    }
+
+    let jira_configured = jira_base_url.is_some();
+
     let profile_config = ProfileConfig {
         base_url: Some(base_url),
         api_path: Some(api_path),
@@ -605,6 +1038,10 @@ fn run_config_init(profile: String, force: bool) -> Result<(), ConfluenceError> 
         default_limit: Some(default_limit),
         max_limit: Some(max_limit),
         max_page_chars: Some(max_page_chars),
+        jira_base_url,
+        jira_api_path,
+        jira_allowed_projects,
+        jira_default_project,
     };
 
     let saved_path =
@@ -641,6 +1078,36 @@ fn run_config_init(profile: String, force: bool) -> Result<(), ConfluenceError> 
         Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
     }
 
+    if jira_configured {
+        match Confirm::new("Jira APIトークンをキーリングに保存しますか?")
+            .with_default(true)
+            .with_help_message("Noの場合は環境変数 JIRA_TOKEN で設定してください")
+            .prompt()
+        {
+            Ok(true) => {
+                let token = Password::new("Jira API Token:")
+                    .prompt()
+                    .map_err(|e| ConfluenceError::ConfigError(e.to_string()))?;
+                if token.trim().is_empty() {
+                    return Err(ConfluenceError::ConfigError(
+                        "Token must not be empty.".to_string(),
+                    ));
+                }
+                store_jira_token_in_keyring(profile_name, &token)?;
+                println!("Jira トークンをキーリングに保存しました。");
+            }
+            Ok(false) => {
+                println!("(トークンは環境変数 JIRA_TOKEN で設定してください)");
+            }
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!(
+                    "\nキャンセルされました。(トークンは環境変数 JIRA_TOKEN で設定してください)"
+                );
+            }
+            Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+        }
+    }
+
     Ok(())
 }
 
@@ -654,13 +1121,20 @@ fn run_skill(args: cli::SkillArgs) -> Result<(), ConfluenceError> {
                     "cannot determine home directory; set HOME and retry".to_string(),
                 )
             })?;
-            let (path, outcome) = skill::install_skill(&skills_dir, skill::SKILL_CONTENT, force)?;
-            match outcome {
-                skill::InstallOutcome::Installed | skill::InstallOutcome::Overwritten => {
-                    println!("Installed skill to {}", path.display());
-                }
-                skill::InstallOutcome::AlreadyUpToDate => {
-                    println!("Skill at {} is already up to date.", path.display());
+            for bundled in skill::BUNDLED_SKILLS {
+                let (path, outcome) =
+                    skill::install_skill(&skills_dir, bundled.name, bundled.content, force)?;
+                match outcome {
+                    skill::InstallOutcome::Installed | skill::InstallOutcome::Overwritten => {
+                        println!("{}: Installed skill to {}", bundled.name, path.display());
+                    }
+                    skill::InstallOutcome::AlreadyUpToDate => {
+                        println!(
+                            "{}: Skill at {} is already up to date.",
+                            bundled.name,
+                            path.display()
+                        );
+                    }
                 }
             }
         }

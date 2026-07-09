@@ -2,8 +2,22 @@ use std::path::{Path, PathBuf};
 
 use crate::error::ConfluenceError;
 
-pub const SKILL_NAME: &str = "confluence-lookup";
-pub const SKILL_CONTENT: &str = include_str!("../.apm/skills/confluence-lookup/SKILL.md");
+/// A skill bundled into the binary at build time.
+pub struct BundledSkill {
+    pub name: &'static str,
+    pub content: &'static str,
+}
+
+pub const BUNDLED_SKILLS: &[BundledSkill] = &[
+    BundledSkill {
+        name: "confluence-lookup",
+        content: include_str!("../.apm/skills/confluence-lookup/SKILL.md"),
+    },
+    BundledSkill {
+        name: "jira-lookup",
+        content: include_str!("../.apm/skills/jira-lookup/SKILL.md"),
+    },
+];
 
 /// The outcome of a [`install_skill`] call.
 #[derive(Debug)]
@@ -21,7 +35,7 @@ pub fn default_skills_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".agents").join("skills"))
 }
 
-/// Install `content` to `<skills_dir>/<SKILL_NAME>/SKILL.md`.
+/// Install `content` to `<skills_dir>/<name>/SKILL.md`.
 ///
 /// Behaviour:
 /// - Destination absent → create parent directories and write.
@@ -31,10 +45,11 @@ pub fn default_skills_dir() -> Option<PathBuf> {
 ///   [`InstallOutcome::Overwritten`].
 pub fn install_skill(
     skills_dir: &Path,
+    name: &str,
     content: &str,
     force: bool,
 ) -> Result<(PathBuf, InstallOutcome), ConfluenceError> {
-    let dest_dir = skills_dir.join(SKILL_NAME);
+    let dest_dir = skills_dir.join(name);
     let dest = dest_dir.join("SKILL.md");
 
     std::fs::create_dir_all(&dest_dir).map_err(|e| {
@@ -81,28 +96,31 @@ mod tests {
     #[test]
     fn install_writes_new_file() {
         let dir = tempdir().unwrap();
-        let (path, outcome) = install_skill(dir.path(), SKILL_CONTENT, false).unwrap();
+        let skill = &BUNDLED_SKILLS[0];
+        let (path, outcome) = install_skill(dir.path(), skill.name, skill.content, false).unwrap();
         assert!(matches!(outcome, InstallOutcome::Installed));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), SKILL_CONTENT);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), skill.content);
     }
 
     #[test]
     fn already_up_to_date() {
         let dir = tempdir().unwrap();
-        install_skill(dir.path(), SKILL_CONTENT, false).unwrap();
-        let (_, outcome) = install_skill(dir.path(), SKILL_CONTENT, false).unwrap();
+        let skill = &BUNDLED_SKILLS[0];
+        install_skill(dir.path(), skill.name, skill.content, false).unwrap();
+        let (_, outcome) = install_skill(dir.path(), skill.name, skill.content, false).unwrap();
         assert!(matches!(outcome, InstallOutcome::AlreadyUpToDate));
     }
 
     #[test]
     fn different_content_without_force_errors() {
         let dir = tempdir().unwrap();
-        install_skill(dir.path(), SKILL_CONTENT, false).unwrap();
+        let skill = &BUNDLED_SKILLS[0];
+        install_skill(dir.path(), skill.name, skill.content, false).unwrap();
         // Tamper with the installed file.
-        let dest = dir.path().join(SKILL_NAME).join("SKILL.md");
+        let dest = dir.path().join(skill.name).join("SKILL.md");
         std::fs::write(&dest, "modified content").unwrap();
 
-        let err = install_skill(dir.path(), SKILL_CONTENT, false).unwrap_err();
+        let err = install_skill(dir.path(), skill.name, skill.content, false).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("--force"),
@@ -113,20 +131,26 @@ mod tests {
     #[test]
     fn force_overwrites_different_content() {
         let dir = tempdir().unwrap();
-        install_skill(dir.path(), SKILL_CONTENT, false).unwrap();
-        let dest = dir.path().join(SKILL_NAME).join("SKILL.md");
+        let skill = &BUNDLED_SKILLS[0];
+        install_skill(dir.path(), skill.name, skill.content, false).unwrap();
+        let dest = dir.path().join(skill.name).join("SKILL.md");
         std::fs::write(&dest, "modified content").unwrap();
 
-        let (path, outcome) = install_skill(dir.path(), SKILL_CONTENT, true).unwrap();
+        let (path, outcome) = install_skill(dir.path(), skill.name, skill.content, true).unwrap();
         assert!(matches!(outcome, InstallOutcome::Overwritten));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), SKILL_CONTENT);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), skill.content);
     }
 
     #[test]
     fn embedded_skill_content_has_expected_name() {
-        assert!(
-            SKILL_CONTENT.contains("name: confluence-lookup"),
-            "embedded SKILL.md must contain 'name: confluence-lookup'"
-        );
+        for skill in BUNDLED_SKILLS {
+            let marker = format!("name: {}", skill.name);
+            assert!(
+                skill.content.contains(&marker),
+                "embedded SKILL.md for '{}' must contain '{}'",
+                skill.name,
+                marker
+            );
+        }
     }
 }

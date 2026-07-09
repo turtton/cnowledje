@@ -4,6 +4,8 @@ pub mod config;
 pub mod cql;
 pub mod error;
 pub mod format;
+pub mod jira_client;
+pub mod jql;
 pub mod markdown;
 pub mod models;
 pub mod skill;

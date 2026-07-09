@@ -29,3 +29,11 @@ pub enum PageFormat {
     StorageHtml,
     Plain,
 }
+
+/// Output format for the jira issue command.
+#[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]
+pub enum IssueFormat {
+    Markdown,
+    Json,
+    Plain,
+}

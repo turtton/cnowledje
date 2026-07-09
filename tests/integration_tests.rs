@@ -5,6 +5,8 @@
 //! verified by unit tests inside each module.
 
 use cnowledje::cql;
+use cnowledje::error::ConfluenceError;
+use cnowledje::jql;
 use cnowledje::markdown;
 use cnowledje::models;
 use cnowledje::types::SearchIn;
@@ -80,6 +82,266 @@ fn page_id_from_path_url() {
 fn page_id_invalid_returns_err() {
     assert!(cql::extract_page_id("not-a-page").is_err());
     assert!(cql::extract_page_id("https://example.com/wiki/display/DEV/Redis").is_err());
+}
+
+// ── JQL generation ─────────────────────────────────────────────────────────────
+
+#[test]
+fn jql_project_single() {
+    let filters = jql::JqlFilters {
+        statuses: &[],
+        assignee: None,
+        reporter: None,
+        issue_types: &[],
+        labels: &[],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string()], None, &filters);
+    assert_eq!(q, r#"project = "DEV" ORDER BY updated DESC"#);
+}
+
+#[test]
+fn jql_project_multiple() {
+    let filters = jql::JqlFilters {
+        statuses: &[],
+        assignee: None,
+        reporter: None,
+        issue_types: &[],
+        labels: &[],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string(), "OPS".to_string()], None, &filters);
+    assert_eq!(q, r#"project in ("DEV", "OPS") ORDER BY updated DESC"#);
+}
+
+#[test]
+fn jql_query_text_clause_present_when_query_given() {
+    let filters = jql::JqlFilters {
+        statuses: &[],
+        assignee: None,
+        reporter: None,
+        issue_types: &[],
+        labels: &[],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string()], Some("redis"), &filters);
+    assert!(q.contains(r#"text ~ "redis""#));
+}
+
+#[test]
+fn jql_query_text_clause_absent_when_none_or_blank() {
+    let filters = jql::JqlFilters {
+        statuses: &[],
+        assignee: None,
+        reporter: None,
+        issue_types: &[],
+        labels: &[],
+    };
+    let none_q = jql::build_search_jql(&["DEV".to_string()], None, &filters);
+    assert!(!none_q.contains("text ~"));
+
+    let blank_q = jql::build_search_jql(&["DEV".to_string()], Some("   "), &filters);
+    assert!(!blank_q.contains("text ~"));
+}
+
+#[test]
+fn jql_filter_status_single_and_multiple() {
+    let single = jql::JqlFilters {
+        statuses: &["Open".to_string()],
+        assignee: None,
+        reporter: None,
+        issue_types: &[],
+        labels: &[],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string()], None, &single);
+    assert!(q.contains(r#"status = "Open""#));
+
+    let multi = jql::JqlFilters {
+        statuses: &["Open".to_string(), "In Progress".to_string()],
+        assignee: None,
+        reporter: None,
+        issue_types: &[],
+        labels: &[],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string()], None, &multi);
+    assert!(q.contains(r#"status in ("Open", "In Progress")"#));
+}
+
+#[test]
+fn jql_filter_assignee() {
+    let filters = jql::JqlFilters {
+        statuses: &[],
+        assignee: Some("alice"),
+        reporter: None,
+        issue_types: &[],
+        labels: &[],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string()], None, &filters);
+    assert!(q.contains(r#"assignee = "alice""#));
+}
+
+#[test]
+fn jql_filter_reporter() {
+    let filters = jql::JqlFilters {
+        statuses: &[],
+        assignee: None,
+        reporter: Some("bob"),
+        issue_types: &[],
+        labels: &[],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string()], None, &filters);
+    assert!(q.contains(r#"reporter = "bob""#));
+}
+
+#[test]
+fn jql_filter_issue_type_single_and_multiple() {
+    let single = jql::JqlFilters {
+        statuses: &[],
+        assignee: None,
+        reporter: None,
+        issue_types: &["Bug".to_string()],
+        labels: &[],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string()], None, &single);
+    assert!(q.contains(r#"issuetype = "Bug""#));
+
+    let multi = jql::JqlFilters {
+        statuses: &[],
+        assignee: None,
+        reporter: None,
+        issue_types: &["Bug".to_string(), "Task".to_string()],
+        labels: &[],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string()], None, &multi);
+    assert!(q.contains(r#"issuetype in ("Bug", "Task")"#));
+}
+
+#[test]
+fn jql_filter_label_single_and_multiple() {
+    let single = jql::JqlFilters {
+        statuses: &[],
+        assignee: None,
+        reporter: None,
+        issue_types: &[],
+        labels: &["urgent".to_string()],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string()], None, &single);
+    assert!(q.contains(r#"labels = "urgent""#));
+
+    let multi = jql::JqlFilters {
+        statuses: &[],
+        assignee: None,
+        reporter: None,
+        issue_types: &[],
+        labels: &["urgent".to_string(), "backend".to_string()],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string()], None, &multi);
+    assert!(q.contains(r#"labels in ("urgent", "backend")"#));
+}
+
+#[test]
+fn jql_combined_filters_clause_order_and_trailing_sort() {
+    let filters = jql::JqlFilters {
+        statuses: &["Open".to_string(), "In Progress".to_string()],
+        assignee: Some("alice"),
+        reporter: Some("bob"),
+        issue_types: &["Bug".to_string()],
+        labels: &["urgent".to_string(), "backend".to_string()],
+    };
+    let q = jql::build_search_jql(&["DEV".to_string()], Some("redis"), &filters);
+    assert_eq!(
+        q,
+        r#"project = "DEV" AND text ~ "redis" AND status in ("Open", "In Progress") AND assignee = "alice" AND reporter = "bob" AND issuetype = "Bug" AND labels in ("urgent", "backend") ORDER BY updated DESC"#
+    );
+}
+
+#[test]
+fn jql_filters_only_no_query_still_produces_jql() {
+    let filters = jql::JqlFilters {
+        statuses: &["Open".to_string()],
+        assignee: None,
+        reporter: None,
+        issue_types: &[],
+        labels: &[],
+    };
+    assert!(!filters.is_empty());
+    let q = jql::build_search_jql(&["DEV".to_string()], None, &filters);
+    assert!(!q.contains("text ~"));
+    assert_eq!(
+        q,
+        r#"project = "DEV" AND status = "Open" ORDER BY updated DESC"#
+    );
+}
+
+#[test]
+fn jql_filters_is_empty_true_when_all_unset() {
+    let filters = jql::JqlFilters {
+        statuses: &[],
+        assignee: None,
+        reporter: None,
+        issue_types: &[],
+        labels: &[],
+    };
+    assert!(filters.is_empty());
+}
+
+#[test]
+fn jql_filters_is_empty_false_when_status_set() {
+    let filters = jql::JqlFilters {
+        statuses: &["Open".to_string()],
+        assignee: None,
+        reporter: None,
+        issue_types: &[],
+        labels: &[],
+    };
+    assert!(!filters.is_empty());
+}
+
+#[test]
+fn jql_filters_is_empty_false_when_assignee_set() {
+    let filters = jql::JqlFilters {
+        statuses: &[],
+        assignee: Some("alice"),
+        reporter: None,
+        issue_types: &[],
+        labels: &[],
+    };
+    assert!(!filters.is_empty());
+}
+
+// ── Issue key extraction ───────────────────────────────────────────────────────
+
+#[test]
+fn jql_issue_key_from_bare_key_uppercased() {
+    assert_eq!(jql::extract_issue_key("PROJ-123").unwrap(), "PROJ-123");
+}
+
+#[test]
+fn jql_issue_key_from_lowercase_key_normalized() {
+    assert_eq!(jql::extract_issue_key("proj-123").unwrap(), "PROJ-123");
+}
+
+#[test]
+fn jql_issue_key_from_browse_url() {
+    let key = jql::extract_issue_key("https://jira.example.com/browse/PROJ-42").unwrap();
+    assert_eq!(key, "PROJ-42");
+}
+
+#[test]
+fn jql_issue_key_from_browse_url_with_query_string() {
+    let key = jql::extract_issue_key("https://jira.example.com/browse/proj-42?focusedCommentId=1")
+        .unwrap();
+    assert_eq!(key, "PROJ-42");
+}
+
+#[test]
+fn jql_issue_key_invalid_bare_word_is_err() {
+    let err = jql::extract_issue_key("not-a-key").unwrap_err();
+    assert!(matches!(err, ConfluenceError::InvalidIssueKey(_)));
+}
+
+#[test]
+fn jql_issue_key_invalid_unrelated_url_is_err() {
+    let err =
+        jql::extract_issue_key("https://jira.example.com/issues/?selectedIssue=42").unwrap_err();
+    assert!(matches!(err, ConfluenceError::InvalidIssueKey(_)));
 }
 
 // ── Markdown conversion ────────────────────────────────────────────────────────
@@ -302,6 +564,7 @@ fn notice_string_present() {
 
 // ── format helpers ─────────────────────────────────────────────────────────────
 
+use cnowledje::format::make_issue_url;
 use cnowledje::format::make_page_url;
 
 #[test]
@@ -334,6 +597,18 @@ fn make_page_url_fallback_to_config_base() {
 fn make_page_url_no_webui() {
     let url = make_page_url("https://confluence.example.local", None, None);
     assert_eq!(url, "https://confluence.example.local");
+}
+
+#[test]
+fn make_issue_url_without_trailing_slash() {
+    let url = make_issue_url("https://jira.example.com", "PROJ-123");
+    assert_eq!(url, "https://jira.example.com/browse/PROJ-123");
+}
+
+#[test]
+fn make_issue_url_strips_trailing_slash() {
+    let url = make_issue_url("https://jira.example.com/", "PROJ-123");
+    assert_eq!(url, "https://jira.example.com/browse/PROJ-123");
 }
 
 use cnowledje::config::{profile_exists_at_path, save_profile_to_path, ProfileConfig};
@@ -448,4 +723,69 @@ fn config_profile_exists_checks_correctly() {
         !profile_exists_at_path("staging", &path).unwrap(),
         "absent profile should return false"
     );
+}
+
+#[test]
+fn config_save_round_trips_jira_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    let profile = ProfileConfig {
+        base_url: Some("https://confluence.example.com".to_string()),
+        api_path: Some("/rest/api".to_string()),
+        jira_base_url: Some("https://jira.example.com".to_string()),
+        jira_api_path: Some("/rest/api/2".to_string()),
+        jira_allowed_projects: Some(vec!["DEV".into(), "OPS".into()]),
+        jira_default_project: Some("DEV".into()),
+        ..Default::default()
+    };
+
+    save_profile_to_path("default", &profile, &path).unwrap();
+
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        content.contains("[default]"),
+        "should contain profile header"
+    );
+    assert!(content.contains("https://confluence.example.com"));
+    assert!(content.contains("jira_base_url"));
+    assert!(content.contains("https://jira.example.com"));
+    assert!(content.contains("jira_api_path"));
+    assert!(content.contains("/rest/api/2"));
+    assert!(content.contains("jira_allowed_projects"));
+    assert!(content.contains("DEV"));
+    assert!(content.contains("OPS"));
+    assert!(content.contains("jira_default_project"));
+}
+
+#[test]
+fn config_save_omits_none_jira_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    let profile = ProfileConfig {
+        base_url: Some("https://example.com".to_string()),
+        ..Default::default()
+    };
+
+    save_profile_to_path("default", &profile, &path).unwrap();
+
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !content.contains("jira_"),
+        "no jira_* keys should appear when all jira fields are None"
+    );
+}
+
+// ── Skill bundle ─────────────────────────────────────────────────────────────
+
+use cnowledje::skill::BUNDLED_SKILLS;
+
+#[test]
+fn bundled_skills_contains_exactly_confluence_and_jira() {
+    assert_eq!(BUNDLED_SKILLS.len(), 2);
+
+    let mut names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["confluence-lookup", "jira-lookup"]);
 }

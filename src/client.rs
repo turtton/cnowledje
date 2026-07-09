@@ -7,6 +7,26 @@ use url::Url;
 use crate::error::ConfluenceError;
 use crate::models::{PageResponse, SearchResponse};
 
+/// Build a `reqwest::Client` with the Bearer auth header set for `token`.
+///
+/// The token value is marked sensitive so it will not appear in debug
+/// output from `reqwest`.
+pub(crate) fn build_http_client(token: &str) -> Result<Client, ConfluenceError> {
+    let mut auth_value = HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|_| {
+        ConfluenceError::ConfigError("invalid token: contains non-ASCII bytes".to_string())
+    })?;
+    auth_value.set_sensitive(true);
+
+    let mut default_headers = HeaderMap::new();
+    default_headers.insert(header::AUTHORIZATION, auth_value);
+    default_headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+
+    Client::builder()
+        .default_headers(default_headers)
+        .build()
+        .map_err(ConfluenceError::RequestError)
+}
+
 pub struct ConfluenceClient {
     client: Client,
     base_url: Url,
@@ -15,23 +35,8 @@ pub struct ConfluenceClient {
 
 impl ConfluenceClient {
     /// Build a new client with a Bearer token.
-    ///
-    /// The token value is marked sensitive so it will not appear in debug
-    /// output from `reqwest`.
     pub fn new(base_url: &str, api_path: &str, token: &str) -> Result<Self, ConfluenceError> {
-        let mut auth_value = HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|_| {
-            ConfluenceError::ConfigError("invalid token: contains non-ASCII bytes".to_string())
-        })?;
-        auth_value.set_sensitive(true);
-
-        let mut default_headers = HeaderMap::new();
-        default_headers.insert(header::AUTHORIZATION, auth_value);
-        default_headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
-
-        let client = Client::builder()
-            .default_headers(default_headers)
-            .build()
-            .map_err(ConfluenceError::RequestError)?;
+        let client = build_http_client(token)?;
 
         // Ensure the base URL ends without a trailing slash so joins work
         // predictably.
@@ -64,7 +69,7 @@ impl ConfluenceClient {
             .send()
             .await?;
 
-        handle_response(response).await
+        handle_response(response, ConfluenceError::Unauthorized).await
     }
 
     /// Retrieve a single page by numeric ID.
@@ -77,19 +82,20 @@ impl ConfluenceClient {
             .send()
             .await?;
 
-        handle_response(response).await
+        handle_response(response, ConfluenceError::Unauthorized).await
     }
 }
 
-async fn handle_response<T: serde::de::DeserializeOwned>(
+pub(crate) async fn handle_response<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
+    unauthorized: ConfluenceError,
 ) -> Result<T, ConfluenceError> {
     match response.status() {
         s if s.is_success() => Ok(response.json::<T>().await?),
-        StatusCode::UNAUTHORIZED => Err(ConfluenceError::Unauthorized),
+        StatusCode::UNAUTHORIZED => Err(unauthorized),
         StatusCode::FORBIDDEN => Err(ConfluenceError::Forbidden),
         StatusCode::NOT_FOUND => Err(ConfluenceError::NotFound(
-            "page or endpoint not found".to_string(),
+            "resource or endpoint not found".to_string(),
         )),
         s => {
             let body = response

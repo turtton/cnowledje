@@ -1,6 +1,6 @@
 # AGENTS.md — cnowledje
 
-Read-only Confluence CLI (Server / Data Center) written in Rust.
+Read-only Confluence & Jira CLI (Server / Data Center) written in Rust.
 
 ## Commands
 
@@ -25,12 +25,14 @@ No CI exists yet. Run `cargo fmt && cargo clippy && cargo test` before committin
 | `src/main.rs` | Binary entrypoint; adds `mod cli` (not part of lib) |
 | `src/cli.rs` | clap arg structs — **binary-only, not in lib** |
 | `src/client.rs` | `ConfluenceClient` — HTTP (GET-only) |
-| `src/config.rs` | Config loading: env vars → system keyring (token only) → TOML file → defaults |
+| `src/jira_client.rs` | `JiraClient` — HTTP (GET-only), shares `build_http_client`/`handle_response` with `client.rs` |
+| `src/config.rs` | Config loading: env vars → system keyring (token only) → TOML file → defaults. Also loads `JiraConfig` (`load_jira_config`) |
 | `src/cql.rs` | CQL generation + page ID extraction |
-| `src/markdown.rs` | Confluence storage HTML → Markdown converter |
-| `src/models.rs` | API response types + CLI output types + `NOTICE` constant |
-| `src/skill.rs` | Bundled SKILL.md (`include_str!`) + `install_skill` (writes to `~/.agents/skills`) |
-| `src/types.rs` | `SearchIn`, `PageFormat` enums |
+| `src/jql.rs` | JQL generation + issue key extraction (Jira analogue of `cql.rs`) |
+| `src/markdown.rs` | Confluence storage HTML → Markdown converter; also renders Jira issue description/comments (`render_issue_content`) |
+| `src/models.rs` | Confluence + Jira API response types, CLI output types, `NOTICE`/`JIRA_NOTICE` constants |
+| `src/skill.rs` | Bundled `SKILL.md` files (`BUNDLED_SKILLS`, `include_str!`) + `install_skill` (writes to `~/.agents/skills`) |
+| `src/types.rs` | `SearchIn`, `PageFormat`, `IssueFormat` enums |
 | `src/error.rs` | `ConfluenceError` enum |
 | `src/format.rs` | Output formatting helpers |
 | `tests/integration_tests.rs` | Integration tests — use lib crate, no live HTTP |
@@ -48,24 +50,36 @@ Priority: **env vars > system keyring (token only) > TOML file > hard-coded defa
 | `CONFLUENCE_API_PATH` | No | `/rest/api` |
 | `CONFLUENCE_ALLOWED_SPACES` | No | (all spaces allowed) |
 | `CONFLUENCE_DEFAULT_SPACE` | No | — |
+| `JIRA_BASE_URL` | env **or** TOML `jira_base_url` | — |
+| `JIRA_TOKEN` | env, keyring, or both (never in TOML) | — |
+| `JIRA_API_PATH` | No | `/rest/api/2` |
+| `JIRA_ALLOWED_PROJECTS` | No | (all projects allowed) |
+| `JIRA_DEFAULT_PROJECT` | No | — |
 
-Config file: `~/.config/cnowledje/config.toml` (profiles: `[default]`, `[staging]`, …)
+Config file (path resolved via `dirs::config_dir()`, profiles: `[default]`, `[staging]`, …):
+- Linux: `~/.config/cnowledje/config.toml`
+- macOS: `~/Library/Application Support/cnowledje/config.toml`
+- Windows: `%APPDATA%\cnowledje\config.toml`
 
-TOML-only settings (no env var override): `default_limit` (default: 10), `max_limit` (default: 50), `max_page_chars` (default: 50000). Note: `default_limit` is loaded but not currently applied to the CLI's `--limit` default (which is hardcoded to 10 in clap).
+TOML-only settings (no env var override): `default_limit` (default: 10), `max_limit` (default: 50), `max_page_chars` (default: 50000, also the shared Jira issue char budget — see below). Note: `default_limit` is loaded but not currently applied to the CLI's `--limit` default (which is hardcoded to 10 in clap).
 
-**Token resolution order: `CONFLUENCE_TOKEN` env var → system keyring (service `cnowledje`, account = profile name) → error. Never write the token in the config file.**
+**Token resolution order:**
+- Confluence: `CONFLUENCE_TOKEN` env var → system keyring (service `cnowledje`, account = profile name) → error.
+- Jira: `JIRA_TOKEN` env var → system keyring (service `cnowledje-jira`, account = profile name) → error.
 
-Token keyring commands: `cnowledje config token set [--profile <name>]` / `cnowledje config token delete [--profile <name>]`
+Never write either token in the config file.
 
-`cnowledje config check` validates config and makes a live API connectivity check — requires a real Confluence instance to succeed.
+Token keyring commands: `cnowledje config token set [--profile <name>] [--jira]` / `cnowledje config token delete [--profile <name>] [--jira]` (`--jira` targets the `cnowledje-jira` keyring service instead of `cnowledje`).
 
-`cnowledje skill install [--force]` writes the embedded `confluence-lookup` SKILL.md to `~/.agents/skills/confluence-lookup/SKILL.md`. Use `--force` when upgrading the binary to overwrite an older installed version.
+`cnowledje config check` validates Confluence and Jira **independently** — a backend with no `base_url` configured prints `(not configured)` and is skipped; a backend that resolves `base_url` **and** a token gets its fields printed plus a live connectivity check (Confluence: `content/search`; Jira: `/myself`); a backend with `base_url` set but no resolvable token (or any other config error) prints `configuration error: ...` and is recorded as a failure without a connectivity check. If *both* backends are entirely unconfigured, it errors with `MissingBaseUrl` (legacy single-backend behavior preserved). Otherwise, the first failure encountered across either backend is returned as the command's error.
+
+`cnowledje skill install [--force]` writes every entry in `skill::BUNDLED_SKILLS` (currently `confluence-lookup` and `jira-lookup`) to `~/.agents/skills/<name>/SKILL.md`. Use `--force` when upgrading the binary to overwrite an older installed version; the command aborts on the first skill whose destination differs and `--force` wasn't passed (already-installed skills before it are not rolled back).
 
 ## Key implementation details
 
 - **`both` search** runs two CQL queries concurrently via `tokio::try_join!` (title + text), deduplicates by page ID, title matches sorted first. Internal fetch limit per query: `min(limit * 2, max_limit)`.
 - **CQL is generated internally** — raw CQL input from users/agents is intentionally not supported.
-- **Token redaction** — `CONFLUENCE_TOKEN` is never logged. Tracing output goes to stderr only.
+- **Token redaction** — `CONFLUENCE_TOKEN` and `JIRA_TOKEN` are never logged; both `ConfluenceClient`/`JiraClient` mark their Bearer header `sensitive` via the shared `client::build_http_client`. Tracing output goes to stderr only.
 - **Confluence macros** (`ac:structured-macro`) — supported macros are converted as follows:
   - `expand` → `**▸ title**` + body inline
   - `code` / `noformat` → fenced code block (with language for `code`)
@@ -81,6 +95,12 @@ Token keyring commands: `cnowledje config token set [--profile <name>]` / `cnowl
 - **JSON error output** — in `--json` mode, errors are emitted as `{"error":{"kind":"…","message":"…"}}`.
 - **Space allowlist** — if `allowed_spaces` is set, passing an unlisted space to `search` is a hard error. `page <id>` does **not** check `allowed_spaces`; access is controlled solely by the token's Confluence permissions.
 - **Page URL formats** — `page` accepts a numeric ID or a URL containing `?pageId=<id>` or `/pages/<id>`. Pretty URLs like `/display/SPACE/Title` are **not** supported and return an error.
+- **JQL is generated internally** (`src/jql.rs`) — raw JQL input from users/agents is intentionally not supported. `build_search_jql` AND-joins clauses in a fixed order (project → text → status → assignee → reporter → issuetype → labels) with a trailing ` ORDER BY updated DESC`; repeatable filters (`--status`/`--type`/`--label`) render as `field in (...)` (OR semantics) when more than one value is given.
+- **`jira search` runs a single JQL query** — no dedup/multi-query merge like Confluence's `both` mode.
+- **`jira issue` rendering** — `expand=renderedFields` HTML is converted via the existing `html_to_markdown` (which handles Confluence `ac:` macros too, but Jira's rendered HTML simply doesn't contain them; `language` is always `None` since `sv-translation` is Confluence-only); when rendered HTML is absent/empty, raw Jira wiki markup is truncated as plain text instead. Description and comments share one character budget (`min(--max-chars, JiraConfig::max_issue_chars)`, where `max_issue_chars` is sourced from the shared TOML `max_page_chars` setting); comments dropped once the budget is exhausted are reported via `omitted_comments` in the output rather than silently disappearing.
+- **Jira issue key extraction** (`jql::extract_issue_key`) accepts a bare key (`PROJ-123`, case-normalized to uppercase) or a URL containing `/browse/<KEY>`; other URL shapes (e.g. Cloud's `?selectedIssue=`) are unsupported and return `InvalidIssueKey`.
+- **Jira keyring** uses a separate service name `cnowledje-jira` (vs. Confluence's `cnowledje`) so both tokens can coexist per profile; `config::keyring_entry` is the shared private helper behind both.
+- **Jira project allowlist** — `jira search` enforces `jira_allowed_projects` via `validate_projects` (same shape as Confluence's `allowed_spaces`). `jira issue <key>` does **not** check it — same policy as `page <id>`; access is controlled solely by the token's Jira permissions.
 
 ## Testing
 
@@ -88,7 +108,11 @@ Unit tests live inside each module (`#[cfg(test)]`). Integration tests are in `t
 - CQL generation (single/multi-space, escaping, `both`/`title`/`text` modes)
 - Page ID extraction from numeric strings and URLs (`?pageId=` and `/pages/<id>` patterns)
 - Markdown conversion (headings, lists, tables, code blocks, macros, Japanese UTF-8, truncation, sv-translation language selection)
-- Format helpers (`make_page_url`)
+- Jira issue rendering (`render_issue_content`: HTML/raw fallback, char-budget exhaustion + `omitted_comments`, empty description/comments)
+- JQL generation (project/status/issuetype/label single vs. `in (...)`, clause order + trailing sort, filters-only queries) and issue key extraction (bare key, `/browse/<KEY>` URL, invalid input)
+- Format helpers (`make_page_url`, `make_issue_url`)
+- Config round-trips including `jira_*` `ProfileConfig` fields
+- Bundled skill set (`skill::BUNDLED_SKILLS` contains exactly `confluence-lookup` and `jira-lookup`)
 
 No live HTTP tests exist. Mock server tests are a planned future addition.
 
@@ -96,4 +120,4 @@ To run a single test: `cargo test <test_fn_name>`
 
 ## Intentionally out of scope
 
-Do not add: raw CQL input, write operations (POST/PUT/PATCH/DELETE), CQL `OR` for `both` mode (uses two separate queries by design), MCP server, RAG/embeddings, OAuth/SSO, attachment upload/delete.
+Do not add: raw CQL input, raw JQL input, write operations (POST/PUT/PATCH/DELETE), CQL `OR` for `both` mode (uses two separate queries by design), MCP server, RAG/embeddings, OAuth/SSO, attachment upload/delete.

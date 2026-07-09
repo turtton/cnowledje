@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfluenceError;
 
+const KEYRING_SERVICE: &str = "cnowledje";
+const KEYRING_SERVICE_JIRA: &str = "cnowledje-jira";
+
+fn keyring_entry(service: &str, profile: &str) -> Result<keyring::Entry, ConfluenceError> {
+    keyring::Entry::new(service, profile).map_err(|e| ConfluenceError::KeyringError(e.to_string()))
+}
+
 /// The source from which the API token was loaded.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -32,6 +39,14 @@ pub struct ProfileConfig {
     pub max_limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_page_chars: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jira_base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jira_api_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jira_allowed_projects: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jira_default_project: Option<String>,
 }
 
 /// Resolved, ready-to-use configuration.
@@ -47,6 +62,21 @@ pub struct Config {
     pub default_limit: u32,
     pub max_limit: u32,
     pub max_page_chars: usize,
+}
+
+/// Resolved, ready-to-use Jira configuration (Server/Data Center, PAT Bearer auth).
+#[derive(Debug, Clone)]
+pub struct JiraConfig {
+    pub base_url: String,
+    pub api_path: String,
+    /// Token is stored but never logged.
+    pub token: String,
+    pub token_source: TokenSource,
+    pub allowed_projects: Option<Vec<String>>,
+    pub default_project: Option<String>,
+    pub default_limit: u32,
+    pub max_limit: u32,
+    pub max_issue_chars: usize,
 }
 
 /// Default path for the TOML config file.
@@ -131,8 +161,7 @@ pub fn resolve_token(profile: &str) -> Result<(String, TokenSource), ConfluenceE
             return Ok((token, TokenSource::Env));
         }
     }
-    let entry = keyring::Entry::new("cnowledje", profile)
-        .map_err(|e| ConfluenceError::KeyringError(e.to_string()))?;
+    let entry = keyring_entry(KEYRING_SERVICE, profile)?;
     match entry.get_password() {
         Ok(token) => Ok((token, TokenSource::Keyring)),
         Err(keyring::Error::NoEntry) => Err(ConfluenceError::MissingToken),
@@ -141,22 +170,129 @@ pub fn resolve_token(profile: &str) -> Result<(String, TokenSource), ConfluenceE
 }
 
 pub fn store_token_in_keyring(profile: &str, token: &str) -> Result<(), ConfluenceError> {
-    let entry = keyring::Entry::new("cnowledje", profile)
-        .map_err(|e| ConfluenceError::KeyringError(e.to_string()))?;
+    let entry = keyring_entry(KEYRING_SERVICE, profile)?;
     entry
         .set_password(token)
         .map_err(|e| ConfluenceError::KeyringError(e.to_string()))
 }
 
 pub fn delete_token_from_keyring(profile: &str) -> Result<(), ConfluenceError> {
-    let entry = keyring::Entry::new("cnowledje", profile)
-        .map_err(|e| ConfluenceError::KeyringError(e.to_string()))?;
+    let entry = keyring_entry(KEYRING_SERVICE, profile)?;
     entry.delete_credential().map_err(|e| match e {
         keyring::Error::NoEntry => {
             ConfluenceError::KeyringError("no token found in keyring".to_string())
         }
         e => ConfluenceError::KeyringError(e.to_string()),
     })
+}
+
+/// Build a [`JiraConfig`] by layering environment variables over the file config.
+///
+/// Priority (highest first):
+/// 1. Environment variables (all settings; token via `JIRA_TOKEN`)
+/// 2. System keyring (token only; service `cnowledje-jira`, account = profile name)
+/// 3. Config file (selected profile)
+/// 4. Hard-coded defaults
+pub fn load_jira_config(profile: Option<&str>) -> Result<JiraConfig, ConfluenceError> {
+    let profile = profile.unwrap_or("default");
+    let file = load_file_config(profile)?;
+
+    let base_url = std::env::var("JIRA_BASE_URL")
+        .ok()
+        .or(file.jira_base_url)
+        .ok_or(ConfluenceError::MissingJiraBaseUrl)?;
+
+    let api_path = std::env::var("JIRA_API_PATH").unwrap_or_else(|_| {
+        file.jira_api_path
+            .unwrap_or_else(|| "/rest/api/2".to_string())
+    });
+
+    // Token resolution: env var > system keyring > error. Never stored in config file.
+    let (token, token_source) = resolve_jira_token(profile)?;
+
+    let allowed_projects = std::env::var("JIRA_ALLOWED_PROJECTS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .or(file.jira_allowed_projects);
+
+    let default_project = std::env::var("JIRA_DEFAULT_PROJECT")
+        .ok()
+        .or(file.jira_default_project);
+
+    Ok(JiraConfig {
+        base_url,
+        api_path,
+        token,
+        token_source,
+        allowed_projects,
+        default_project,
+        default_limit: file.default_limit.unwrap_or(10),
+        max_limit: file.max_limit.unwrap_or(50),
+        max_issue_chars: file.max_page_chars.unwrap_or(50_000),
+    })
+}
+
+pub fn resolve_jira_token(profile: &str) -> Result<(String, TokenSource), ConfluenceError> {
+    if let Ok(token) = std::env::var("JIRA_TOKEN") {
+        if !token.trim().is_empty() {
+            return Ok((token, TokenSource::Env));
+        }
+    }
+    let entry = keyring_entry(KEYRING_SERVICE_JIRA, profile)?;
+    match entry.get_password() {
+        Ok(token) => Ok((token, TokenSource::Keyring)),
+        Err(keyring::Error::NoEntry) => Err(ConfluenceError::MissingJiraToken),
+        Err(e) => Err(ConfluenceError::KeyringError(e.to_string())),
+    }
+}
+
+pub fn store_jira_token_in_keyring(profile: &str, token: &str) -> Result<(), ConfluenceError> {
+    let entry = keyring_entry(KEYRING_SERVICE_JIRA, profile)?;
+    entry
+        .set_password(token)
+        .map_err(|e| ConfluenceError::KeyringError(e.to_string()))
+}
+
+pub fn delete_jira_token_from_keyring(profile: &str) -> Result<(), ConfluenceError> {
+    let entry = keyring_entry(KEYRING_SERVICE_JIRA, profile)?;
+    entry.delete_credential().map_err(|e| match e {
+        keyring::Error::NoEntry => {
+            ConfluenceError::KeyringError("no Jira token found in keyring".to_string())
+        }
+        e => ConfluenceError::KeyringError(e.to_string()),
+    })
+}
+
+/// Validate that all requested projects are in the allowlist.
+pub fn validate_projects(projects: &[String], config: &JiraConfig) -> Result<(), ConfluenceError> {
+    if let Some(allowed) = &config.allowed_projects {
+        for project in projects {
+            if !allowed.iter().any(|a| a.eq_ignore_ascii_case(project)) {
+                return Err(ConfluenceError::ProjectNotAllowed(project.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the effective project list from CLI args and config defaults.
+pub fn resolve_projects(
+    cli_projects: Vec<String>,
+    config: &JiraConfig,
+) -> Result<Vec<String>, ConfluenceError> {
+    if cli_projects.is_empty() {
+        match &config.default_project {
+            Some(p) => Ok(vec![p.clone()]),
+            None => Err(ConfluenceError::NoProjectSpecified),
+        }
+    } else {
+        Ok(cli_projects)
+    }
 }
 
 /// Validate that all requested spaces are in the allowlist.
@@ -397,9 +533,8 @@ mod tests {
         let old = std::env::var("CONFLUENCE_TOKEN").ok();
         std::env::remove_var("CONFLUENCE_TOKEN");
         let result = resolve_token("__cnowledje_test_nonexistent_profile_12345__");
-        match old {
-            Some(v) => std::env::set_var("CONFLUENCE_TOKEN", v),
-            None => {}
+        if let Some(v) = old {
+            std::env::set_var("CONFLUENCE_TOKEN", v)
         }
         assert!(result.is_err());
     }
