@@ -48,7 +48,10 @@ cnowledje config --help   # 設定・トークン管理
 
 ### 検索結果の絞り込み
 
-- Confluence 専用の検索では `--source confluence` を付け、必要に応じて `--space <KEY>` と `--in title|text|both` を指定する。`--source` を省略すると、設定済みの Jira も検索対象になる。
+- Confluence 専用の検索では `--source confluence` を付け、必要に応じて `--space <KEY>` と `--in title|text|both` を指定する。`--in` は検索クエリがある場合のみ指定できる。`--source` を省略すると、設定済みの Jira も検索対象になる。
+- `--label <ラベル>` で Confluence のラベル絞り込みが可能。同じフラグを複数回指定すると OR 条件になる。
+- クエリなしのラベルのみ検索（`cnowledje search --source confluence --space <KEY> --label <ラベル>`）でラベル付きページを列挙できる。
+- 検索結果・`page` 出力の `labels` から関連ラベルを辿れる。
 - `matched_by` に `"title"` を含む結果を優先する。
 - `excerpt` の内容からユーザーの質問に最も関連性の高いページを選ぶ。
 - 判断が難しい場合は上位 2〜3 件を取得して比較する。

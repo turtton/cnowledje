@@ -76,7 +76,9 @@ pub enum ConfluenceError {
     #[error("{0}")]
     InvalidArguments(String),
 
-    #[error("a search query is required to search Confluence; add a query or use --source jira")]
+    #[error(
+        "a search query or --label is required to search Confluence; add one or use --source jira"
+    )]
     QueryRequiredForConfluence,
 }
 

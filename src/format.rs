@@ -14,12 +14,18 @@ pub fn print_search_json(output: &SearchOutput) -> Result<(), ConfluenceError> {
 
 /// Print search results in human-readable form.
 pub fn print_search_human(output: &SearchOutput) {
-    println!(
-        "Search: \"{}\" in [{}] ({})",
-        output.query,
-        output.spaces.join(", "),
-        output.search_in,
-    );
+    match (&output.query, &output.search_in) {
+        (Some(query), Some(search_in)) => println!(
+            "Search: \"{}\" in [{}] ({})",
+            query,
+            output.spaces.join(", "),
+            search_in,
+        ),
+        _ => println!("Search: labels only in [{}]", output.spaces.join(", ")),
+    }
+    if !output.labels.is_empty() {
+        println!("Labels: {}", output.labels.join(", "));
+    }
     println!("Results: {}", output.results.len());
     println!("{}", "─".repeat(72));
 
@@ -31,6 +37,9 @@ pub fn print_search_human(output: &SearchOutput) {
             println!("     Modified : {}", ts);
         }
         println!("     Match  : {}", r.matched_by.join(", "));
+        if !r.labels.is_empty() {
+            println!("     Labels : {}", r.labels.join(", "));
+        }
         if let Some(ex) = &r.excerpt {
             let ex = ex.trim().replace('\n', " ");
             let truncated = if ex.chars().count() > 120 {
@@ -94,6 +103,9 @@ pub fn print_page_markdown(output: &PageOutput) {
     println!("<!-- URL: {} -->", output.url);
     if let Some(ts) = &output.last_modified {
         println!("<!-- Last modified: {} -->", ts);
+    }
+    if !output.labels.is_empty() {
+        println!("<!-- Labels: {} -->", output.labels.join(", "));
     }
     println!();
     println!("{}", output.content_markdown);

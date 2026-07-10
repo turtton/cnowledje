@@ -15,7 +15,7 @@ use cnowledje::types::SearchIn;
 
 #[test]
 fn cql_title_single_space() {
-    let q = cql::build_title_cql(&["DEV".to_string()], "Redis 設計");
+    let q = cql::build_title_cql(&["DEV".to_string()], "Redis 設計", &[]);
     assert!(q.starts_with(r#"space = "DEV""#));
     assert!(q.contains("title ~"));
     assert!(q.contains("Redis 設計"));
@@ -24,26 +24,26 @@ fn cql_title_single_space() {
 
 #[test]
 fn cql_text_multiple_spaces() {
-    let q = cql::build_text_cql(&["DEV".to_string(), "ARCH".to_string()], "Redis");
+    let q = cql::build_text_cql(&["DEV".to_string(), "ARCH".to_string()], "Redis", &[]);
     assert!(q.starts_with(r#"space in ("DEV", "ARCH")"#));
     assert!(q.contains("text ~"));
 }
 
 #[test]
 fn cql_escape_double_quotes_in_query() {
-    let q = cql::build_title_cql(&["DEV".to_string()], r#"say "hello""#);
+    let q = cql::build_title_cql(&["DEV".to_string()], r#"say "hello""#, &[]);
     assert!(q.contains(r#"say \"hello\""#));
 }
 
 #[test]
 fn cql_escape_backslash_in_query() {
-    let q = cql::build_title_cql(&["DEV".to_string()], r"back\slash");
+    let q = cql::build_title_cql(&["DEV".to_string()], r"back\slash", &[]);
     assert!(q.contains(r"back\\slash"));
 }
 
 #[test]
 fn cql_both_returns_two_queries() {
-    let qs = cql::build_cql_queries(&["DEV".to_string()], "test", &SearchIn::Both);
+    let qs = cql::build_cql_queries(&["DEV".to_string()], "test", &SearchIn::Both, &[]);
     assert_eq!(qs.len(), 2);
     assert!(matches!(qs[0].0, SearchIn::Title));
     assert!(matches!(qs[1].0, SearchIn::Text));
@@ -51,7 +51,7 @@ fn cql_both_returns_two_queries() {
 
 #[test]
 fn cql_title_only_returns_one_query() {
-    let qs = cql::build_cql_queries(&["DEV".to_string()], "test", &SearchIn::Title);
+    let qs = cql::build_cql_queries(&["DEV".to_string()], "test", &SearchIn::Title, &[]);
     assert_eq!(qs.len(), 1);
     assert!(matches!(qs[0].0, SearchIn::Title));
 }
@@ -782,9 +782,10 @@ fn config_save_omits_none_jira_fields() {
 #[test]
 fn unified_search_output_keeps_null_jira_and_nested_confluence_shape() {
     let confluence = models::SearchOutput {
-        query: "release readiness".into(),
+        query: Some("release readiness".into()),
         spaces: vec!["ENG".into()],
-        search_in: "both".into(),
+        labels: vec![],
+        search_in: Some("both".into()),
         results: vec![models::SearchResultOutput {
             id: "123".into(),
             title: "Release readiness".into(),
@@ -793,6 +794,7 @@ fn unified_search_output_keeps_null_jira_and_nested_confluence_shape() {
             url: "https://confluence.example.com/pages/123".into(),
             last_modified: Some("2026-07-10T00:00:00Z".into()),
             matched_by: vec!["title".into()],
+            labels: vec![],
             excerpt: Some("Ready for release".into()),
         }],
     };
@@ -807,6 +809,22 @@ fn unified_search_output_keeps_null_jira_and_nested_confluence_shape() {
 
     assert_eq!(json.get("jira"), Some(&serde_json::Value::Null));
     assert_eq!(json.get("confluence"), Some(&expected_confluence));
+}
+
+#[test]
+fn label_only_search_output_serializes_null_query_and_search_in() {
+    let output = models::SearchOutput {
+        query: None,
+        spaces: vec!["DEV".into()],
+        labels: vec![],
+        search_in: None,
+        results: vec![],
+    };
+
+    let json = serde_json::to_value(output).unwrap();
+    assert_eq!(json.get("query"), Some(&serde_json::Value::Null));
+    assert_eq!(json.get("search_in"), Some(&serde_json::Value::Null));
+    assert_eq!(json.get("labels"), Some(&serde_json::json!([])));
 }
 
 #[test]
@@ -885,4 +903,52 @@ fn bundled_skills_contains_exactly_confluence_and_jira() {
     let mut names: Vec<&str> = BUNDLED_SKILLS.iter().map(|s| s.name).collect();
     names.sort_unstable();
     assert_eq!(names, vec!["confluence-lookup", "jira-lookup"]);
+}
+
+#[test]
+fn confluence_search_result_metadata_labels_are_extracted_in_api_order() {
+    let json = serde_json::json!({
+        "id": "123",
+        "title": "Release readiness",
+        "space": {"key": "ENG", "name": "Engineering"},
+        "version": {"when": "2026-07-10T00:00:00Z"},
+        "excerpt": null,
+        "metadata": {
+            "labels": {
+                "results": [{"name": "api"}, {"name": "release-readiness"}]
+            }
+        },
+        "_links": {"webui": "/pages/123"}
+    });
+
+    let result: models::SearchResult = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        result.metadata.label_names(),
+        vec!["api".to_string(), "release-readiness".to_string()]
+    );
+}
+
+#[test]
+fn confluence_metadata_defaults_when_response_omits_metadata() {
+    let result_json = serde_json::json!({
+        "id": "123",
+        "title": "Release readiness",
+        "space": {"key": "ENG", "name": "Engineering"},
+        "version": {"when": null},
+        "excerpt": null,
+        "_links": {"webui": "/pages/123"}
+    });
+    let result: models::SearchResult = serde_json::from_value(result_json).unwrap();
+    assert!(result.metadata.label_names().is_empty());
+
+    let page_json = serde_json::json!({
+        "id": "123",
+        "title": "Release readiness",
+        "space": {"key": "ENG", "name": "Engineering"},
+        "version": {"when": null},
+        "body": null,
+        "_links": {"webui": "/pages/123", "base": "https://confluence.example.com"}
+    });
+    let page: models::PageResponse = serde_json::from_value(page_json).unwrap();
+    assert!(page.metadata.label_names().is_empty());
 }

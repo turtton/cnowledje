@@ -17,6 +17,8 @@ pub struct SearchResult {
     pub space: Space,
     pub version: Version,
     pub excerpt: Option<String>,
+    #[serde(default)]
+    pub metadata: Metadata,
     #[serde(rename = "_links")]
     pub links: ResultLinks,
 }
@@ -49,6 +51,8 @@ pub struct PageResponse {
     pub space: Space,
     pub version: Version,
     pub body: Option<PageBody>,
+    #[serde(default)]
+    pub metadata: Metadata,
     #[serde(rename = "_links")]
     pub links: PageLinks,
 }
@@ -69,6 +73,34 @@ pub struct StorageBody {
     pub value: String,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct Metadata {
+    #[serde(default)]
+    pub labels: LabelContainer,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct LabelContainer {
+    #[serde(default)]
+    pub results: Vec<Label>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Label {
+    pub name: String,
+}
+
+impl Metadata {
+    /// Label names in API order.
+    pub fn label_names(&self) -> Vec<String> {
+        self.labels
+            .results
+            .iter()
+            .map(|label| label.name.clone())
+            .collect()
+    }
+}
+
 // ── CLI output types ──────────────────────────────────────────────────────────
 
 pub const NOTICE: &str =
@@ -76,9 +108,10 @@ pub const NOTICE: &str =
 
 #[derive(Debug, Serialize)]
 pub struct SearchOutput {
-    pub query: String,
+    pub query: Option<String>,
     pub spaces: Vec<String>,
-    pub search_in: String,
+    pub labels: Vec<String>,
+    pub search_in: Option<String>,
     pub results: Vec<SearchResultOutput>,
 }
 
@@ -99,6 +132,7 @@ pub struct SearchResultOutput {
     pub url: String,
     pub last_modified: Option<String>,
     pub matched_by: Vec<String>,
+    pub labels: Vec<String>,
     pub excerpt: Option<String>,
 }
 
@@ -109,6 +143,7 @@ pub struct PageOutput {
     pub space_key: String,
     pub url: String,
     pub last_modified: Option<String>,
+    pub labels: Vec<String>,
     pub content_markdown: String,
     pub notice: &'static str,
 }

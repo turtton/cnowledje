@@ -64,7 +64,7 @@ impl ConfluenceClient {
             .query(&[
                 ("cql", cql.to_string()),
                 ("limit", limit.to_string()),
-                ("expand", "space,version,_links".to_string()),
+                ("expand", "space,version,metadata.labels,_links".to_string()),
             ])
             .send()
             .await?;
@@ -78,7 +78,10 @@ impl ConfluenceClient {
         let response = self
             .client
             .get(url)
-            .query(&[("expand", "space,version,body.storage,_links")])
+            .query(&[(
+                "expand",
+                "space,version,body.storage,metadata.labels,_links",
+            )])
             .send()
             .await?;
 

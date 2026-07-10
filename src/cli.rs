@@ -31,6 +31,9 @@ EXAMPLES:
   # Search Jira using filters only (query omitted)
   cnowledje search --project DEV --assignee jdoe --status Open --type Bug
 
+  # Label-only search (no query) across Confluence and Jira
+  cnowledje search --space DEV --project DEV --label api
+
   # Search across multiple Confluence spaces
   cnowledje search \"API仕様\" --space DEV --space ARCH --json
 
@@ -38,11 +41,11 @@ NOTES:
   * --source confluence, --source jira, or --source all selects the backend(s).
     Omitting --source requests both configured backends.
   * --space and --in apply only to Confluence. --project, --status, --assignee,
-    --reporter, --type, and --label apply only to Jira. Passing flags for a
-    backend excluded by --source is an error.
-  * Without a query, at least one Jira filter is required. Filters-only searches
-    automatically search Jira alone only when --source is omitted and no
-    Confluence flag is given; otherwise a query is required for Confluence.
+    --reporter, --type apply only to Jira. --label applies to both backends.
+    Passing flags for a backend excluded by --source is an error.
+  * Without a query, at least one Jira filter or --label is required. Filters-only searches
+    automatically search Jira alone only when --source is omitted and no Confluence flag is given;
+    --label also permits a label-only Confluence search. --in requires a search query.
   * A backend named by --source or with one of its flags is required to be
     configured. Unpinned, unconfigured backends may be skipped with a warning.
   * --space is required for Confluence unless default_space is configured;
@@ -51,8 +54,9 @@ NOTES:
   * --limit is capped by each participating backend's configured max_limit
     (default 50).
   * --json output shape:
-      { \"query\", \"confluence\": { \"query\", \"spaces\", \"search_in\", \"results\": [...] } | null,
+      { \"query\", \"confluence\": { \"query\", \"spaces\", \"labels\", \"search_in\", \"results\": [...] } | null,
         \"jira\": { \"query\", \"projects\", \"jql\", \"total\", \"results\": [...] } | null }
+    For label-only Confluence searches, \"query\" and \"search_in\" are null.
     The Confluence and Jira result objects retain their existing fields. A
     backend that was not searched is represented as null.";
 
@@ -76,6 +80,7 @@ EXAMPLES:
 NOTES:
   * Markdown output always includes the title and URL as HTML comments;
     the last-modified date is included only when available.
+  * Markdown output includes a Labels comment line when the page has labels.
   * --max-chars is bounded by the configured max_page_chars; the smaller
     value wins. Truncated output ends with [content truncated].
   * Supported URL forms: \"?pageId=<ID>\" and \"/pages/<ID>\".
@@ -116,8 +121,8 @@ pub enum Commands {
 #[derive(Args)]
 #[command(after_long_help = SEARCH_AFTER_HELP)]
 pub struct SearchArgs {
-    /// Search keywords. Optional if at least one Jira filter flag is given
-    /// (then only Jira is searched).
+    /// Search keywords. Optional if --label or at least one Jira filter is given.
+    /// Without a query, --in cannot be used.
     pub query: Option<String>,
 
     /// Backend(s) to search (default: all configured backends).
@@ -152,7 +157,7 @@ pub struct SearchArgs {
     #[arg(long = "type", value_name = "TYPE")]
     pub issue_types: Vec<String>,
 
-    /// Filter by label. May be repeated (OR).
+    /// Filter by label (Confluence and Jira). May be repeated (OR).
     #[arg(long = "label")]
     pub labels: Vec<String>,
 

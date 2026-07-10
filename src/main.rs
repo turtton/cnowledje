@@ -11,7 +11,9 @@ use cnowledje::config::{
     save_profile_to_path, store_jira_token_in_keyring, store_token_in_keyring, validate_projects,
     validate_spaces, Config, JiraConfig, TokenSource,
 };
-use cnowledje::cql::{build_exact_title_cql, build_text_cql, build_title_cql, extract_page_id};
+use cnowledje::cql::{
+    build_exact_title_cql, build_label_cql, build_text_cql, build_title_cql, extract_page_id,
+};
 use cnowledje::error::ConfluenceError;
 use cnowledje::format::{
     make_issue_url, make_page_url, print_error_json, print_jira_issue_json,
@@ -115,6 +117,7 @@ struct SearchPlan {
 fn plan_search_sources(
     source: Option<SearchSource>,
     query_present: bool,
+    labels_present: bool,
     confluence_flags: bool,
     jira_flags: bool,
 ) -> Result<SearchPlan, ConfluenceError> {
@@ -131,11 +134,11 @@ fn plan_search_sources(
     }
     if !jira && jira_flags {
         return Err(ConfluenceError::InvalidArguments(
-            "--project/--status/--assignee/--reporter/--type/--label apply to Jira but --source confluence excludes it".into(),
+            "--project/--status/--assignee/--reporter/--type apply to Jira but --source confluence excludes it".into(),
         ));
     }
 
-    if !query_present {
+    if !query_present && !labels_present {
         if !jira_flags {
             return Err(ConfluenceError::NoSearchCriteria);
         }
@@ -149,19 +152,30 @@ fn plan_search_sources(
 }
 
 async fn run_search(args: cli::SearchArgs) -> Result<(), ConfluenceError> {
-    let query_present = args
+    let query = args
         .query
         .as_deref()
-        .map(|query| !query.trim().is_empty())
-        .unwrap_or(false);
+        .filter(|query| !query.trim().is_empty());
+    let query_present = query.is_some();
+    let labels_present = !args.labels.is_empty();
     let confluence_flags = !args.spaces.is_empty() || args.search_in.is_some();
     let jira_flags = !args.projects.is_empty()
         || !args.status.is_empty()
         || args.assignee.is_some()
         || args.reporter.is_some()
-        || !args.issue_types.is_empty()
-        || !args.labels.is_empty();
-    let plan = plan_search_sources(args.source, query_present, confluence_flags, jira_flags)?;
+        || !args.issue_types.is_empty();
+    if args.search_in.is_some() && !query_present {
+        return Err(ConfluenceError::InvalidArguments(
+            "--in requires a search query".into(),
+        ));
+    }
+    let plan = plan_search_sources(
+        args.source,
+        query_present,
+        labels_present,
+        confluence_flags,
+        jira_flags,
+    )?;
 
     let confluence_pinned = matches!(
         args.source,
@@ -258,33 +272,27 @@ async fn run_search(args: cli::SearchArgs) -> Result<(), ConfluenceError> {
     };
     let (confluence, jira) = match (confluence_leg, jira_leg) {
         (Some((confluence_config, spaces, search_in)), Some((jira_config, projects))) => {
-            let query = args.query.as_deref().expect("Confluence requires a query");
             let (confluence, jira) = tokio::try_join!(
-                search_confluence(&confluence_config, query, spaces, &search_in, args.limit,),
-                search_jira(
-                    &jira_config,
-                    args.query.as_deref(),
-                    projects,
-                    &filters,
+                search_confluence(
+                    &confluence_config,
+                    query,
+                    spaces,
+                    &search_in,
+                    &args.labels,
                     args.limit,
                 ),
+                search_jira(&jira_config, query, projects, &filters, args.limit,),
             )?;
             (Some(confluence), Some(jira))
         }
         (Some((config, spaces, search_in)), None) => {
-            let query = args.query.as_deref().expect("Confluence requires a query");
-            let output = search_confluence(&config, query, spaces, &search_in, args.limit).await?;
+            let output =
+                search_confluence(&config, query, spaces, &search_in, &args.labels, args.limit)
+                    .await?;
             (Some(output), None)
         }
         (None, Some((config, projects))) => {
-            let output = search_jira(
-                &config,
-                args.query.as_deref(),
-                projects,
-                &filters,
-                args.limit,
-            )
-            .await?;
+            let output = search_jira(&config, query, projects, &filters, args.limit).await?;
             (None, Some(output))
         }
         (None, None) => {
@@ -293,7 +301,7 @@ async fn run_search(args: cli::SearchArgs) -> Result<(), ConfluenceError> {
     };
 
     let output = UnifiedSearchOutput {
-        query: args.query.clone(),
+        query: query.map(str::to_string),
         confluence,
         jira,
     };
@@ -308,60 +316,64 @@ async fn run_search(args: cli::SearchArgs) -> Result<(), ConfluenceError> {
 
 async fn search_confluence(
     config: &Config,
-    query: &str,
+    query: Option<&str>,
     spaces: Vec<String>,
     search_in: &SearchIn,
+    labels: &[String],
     limit: u32,
 ) -> Result<SearchOutput, ConfluenceError> {
     let client = ConfluenceClient::new(&config.base_url, &config.api_path, &config.token)?;
     let internal_limit = std::cmp::min(limit * 2, config.max_limit);
-    let (title_results, text_results) = match search_in {
-        SearchIn::Title => {
-            let cql = build_title_cql(&spaces, query);
+    let groups: Vec<(&'static str, Vec<SearchResult>)> = match query {
+        Some(query) => match search_in {
+            SearchIn::Title => {
+                let cql = build_title_cql(&spaces, query, labels);
+                let response = client.search(&cql, internal_limit).await?;
+                vec![("title", response.results)]
+            }
+            SearchIn::Text => {
+                let cql = build_text_cql(&spaces, query, labels);
+                let response = client.search(&cql, internal_limit).await?;
+                vec![("text", response.results)]
+            }
+            SearchIn::Both => {
+                let title_cql = build_title_cql(&spaces, query, labels);
+                let text_cql = build_text_cql(&spaces, query, labels);
+                let (title_response, text_response) = tokio::try_join!(
+                    client.search(&title_cql, internal_limit),
+                    client.search(&text_cql, internal_limit)
+                )?;
+                vec![
+                    ("title", title_response.results),
+                    ("text", text_response.results),
+                ]
+            }
+        },
+        None => {
+            let cql = build_label_cql(&spaces, labels);
             let response = client.search(&cql, internal_limit).await?;
-            (response.results, vec![])
-        }
-        SearchIn::Text => {
-            let cql = build_text_cql(&spaces, query);
-            let response = client.search(&cql, internal_limit).await?;
-            (vec![], response.results)
-        }
-        SearchIn::Both => {
-            let title_cql = build_title_cql(&spaces, query);
-            let text_cql = build_text_cql(&spaces, query);
-            let (title_response, text_response) = tokio::try_join!(
-                client.search(&title_cql, internal_limit),
-                client.search(&text_cql, internal_limit)
-            )?;
-            (title_response.results, text_response.results)
+            vec![("label", response.results)]
         }
     };
 
     let mut seen = HashSet::new();
     let mut matched_by: HashMap<String, Vec<String>> = HashMap::new();
     let mut order = Vec::new();
-    for result in &title_results {
-        if seen.insert(result.id.clone()) {
-            order.push(result.id.clone());
+    for (matched, group) in &groups {
+        for result in group {
+            if seen.insert(result.id.clone()) {
+                order.push(result.id.clone());
+            }
+            matched_by
+                .entry(result.id.clone())
+                .or_default()
+                .push((*matched).to_string());
         }
-        matched_by
-            .entry(result.id.clone())
-            .or_default()
-            .push("title".to_string());
-    }
-    for result in &text_results {
-        if seen.insert(result.id.clone()) {
-            order.push(result.id.clone());
-        }
-        matched_by
-            .entry(result.id.clone())
-            .or_default()
-            .push("text".to_string());
     }
 
-    let all_results: HashMap<String, &SearchResult> = title_results
+    let all_results: HashMap<String, &SearchResult> = groups
         .iter()
-        .chain(text_results.iter())
+        .flat_map(|(_, group)| group.iter())
         .map(|result| (result.id.clone(), result))
         .collect();
     let results = order
@@ -376,14 +388,16 @@ async fn search_confluence(
             url: make_page_url(&config.base_url, None, result.links.webui.as_deref()),
             last_modified: result.version.when.clone(),
             matched_by: matched_by.get(&result.id).cloned().unwrap_or_default(),
+            labels: result.metadata.label_names(),
             excerpt: result.excerpt.clone(),
         })
         .collect();
 
     Ok(SearchOutput {
-        query: query.to_string(),
+        query: query.map(str::to_string),
         spaces,
-        search_in: search_in.to_string(),
+        labels: labels.to_vec(),
+        search_in: query.is_some().then(|| search_in.to_string()),
         results,
     })
 }
@@ -482,6 +496,7 @@ async fn run_page(args: cli::PageArgs) -> Result<(), ConfluenceError> {
         space_key: page.space.key.clone(),
         url: url.clone(),
         last_modified: page.version.when.clone(),
+        labels: page.metadata.label_names(),
         content_markdown,
         notice: NOTICE,
     };
@@ -1324,7 +1339,7 @@ mod tests {
     #[test]
     fn plan_search_sources_defaults_to_both_backends_for_a_query() {
         assert_eq!(
-            plan_search_sources(None, true, false, false).unwrap(),
+            plan_search_sources(None, true, false, false, false).unwrap(),
             SearchPlan {
                 confluence: true,
                 jira: true,
@@ -1335,7 +1350,7 @@ mod tests {
     #[test]
     fn plan_search_sources_rejects_a_search_without_query_or_jira_filters() {
         assert!(matches!(
-            plan_search_sources(None, false, false, false),
+            plan_search_sources(None, false, false, false, false),
             Err(ConfluenceError::NoSearchCriteria)
         ));
     }
@@ -1343,7 +1358,7 @@ mod tests {
     #[test]
     fn plan_search_sources_routes_filter_only_searches_to_jira() {
         assert_eq!(
-            plan_search_sources(None, false, false, true).unwrap(),
+            plan_search_sources(None, false, false, false, true).unwrap(),
             SearchPlan {
                 confluence: false,
                 jira: true,
@@ -1354,7 +1369,7 @@ mod tests {
     #[test]
     fn plan_search_sources_requires_a_query_when_all_is_explicit_for_jira_filters() {
         assert!(matches!(
-            plan_search_sources(Some(SearchSource::All), false, false, true),
+            plan_search_sources(Some(SearchSource::All), false, false, false, true),
             Err(ConfluenceError::QueryRequiredForConfluence)
         ));
     }
@@ -1362,7 +1377,7 @@ mod tests {
     #[test]
     fn plan_search_sources_requires_a_query_when_confluence_flags_are_present() {
         assert!(matches!(
-            plan_search_sources(None, false, true, true),
+            plan_search_sources(None, false, false, true, true),
             Err(ConfluenceError::QueryRequiredForConfluence)
         ));
     }
@@ -1370,7 +1385,7 @@ mod tests {
     #[test]
     fn plan_search_sources_rejects_confluence_flags_when_jira_is_explicit() {
         assert!(matches!(
-            plan_search_sources(Some(SearchSource::Jira), true, true, false),
+            plan_search_sources(Some(SearchSource::Jira), true, false, true, false),
             Err(ConfluenceError::InvalidArguments(message))
                 if message == "--space/--in apply to Confluence but --source jira excludes it"
         ));
@@ -1379,16 +1394,49 @@ mod tests {
     #[test]
     fn plan_search_sources_rejects_jira_flags_when_confluence_is_explicit() {
         assert!(matches!(
-            plan_search_sources(Some(SearchSource::Confluence), true, false, true),
+            plan_search_sources(Some(SearchSource::Confluence), true, false, false, true),
             Err(ConfluenceError::InvalidArguments(message))
-                if message == "--project/--status/--assignee/--reporter/--type/--label apply to Jira but --source confluence excludes it"
+                if message == "--project/--status/--assignee/--reporter/--type apply to Jira but --source confluence excludes it"
         ));
     }
 
     #[test]
     fn plan_search_sources_honors_explicit_jira_for_a_query() {
         assert_eq!(
-            plan_search_sources(Some(SearchSource::Jira), true, false, false).unwrap(),
+            plan_search_sources(Some(SearchSource::Jira), true, false, false, false).unwrap(),
+            SearchPlan {
+                confluence: false,
+                jira: true,
+            }
+        );
+    }
+
+    #[test]
+    fn plan_search_sources_routes_label_only_search_to_both_backends() {
+        assert_eq!(
+            plan_search_sources(None, false, true, false, false).unwrap(),
+            SearchPlan {
+                confluence: true,
+                jira: true,
+            }
+        );
+    }
+
+    #[test]
+    fn plan_search_sources_allows_label_only_confluence_search() {
+        assert_eq!(
+            plan_search_sources(Some(SearchSource::Confluence), false, true, false, false).unwrap(),
+            SearchPlan {
+                confluence: true,
+                jira: false,
+            }
+        );
+    }
+
+    #[test]
+    fn plan_search_sources_allows_label_only_jira_search() {
+        assert_eq!(
+            plan_search_sources(Some(SearchSource::Jira), false, true, false, false).unwrap(),
             SearchPlan {
                 confluence: false,
                 jira: true,

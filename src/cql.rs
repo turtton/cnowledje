@@ -22,21 +22,54 @@ fn space_clause(spaces: &[String]) -> String {
     }
 }
 
+fn label_clause(labels: &[String]) -> String {
+    if labels.len() == 1 {
+        format!("label = \"{}\"", escape_cql(&labels[0]))
+    } else {
+        let names: Vec<String> = labels
+            .iter()
+            .map(|label| format!("\"{}\"", escape_cql(label)))
+            .collect();
+        format!("label in ({})", names.join(", "))
+    }
+}
+
 /// Build a CQL query that matches the page title.
-pub fn build_title_cql(spaces: &[String], query: &str) -> String {
+pub fn build_title_cql(spaces: &[String], query: &str, labels: &[String]) -> String {
+    let label = if labels.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {}", label_clause(labels))
+    };
     format!(
-        "{} AND type = page AND title ~ \"{}\" ORDER BY lastmodified DESC",
+        "{} AND type = page AND title ~ \"{}\"{} ORDER BY lastmodified DESC",
         space_clause(spaces),
-        escape_cql(query)
+        escape_cql(query),
+        label
     )
 }
 
 /// Build a CQL query that searches the full page text.
-pub fn build_text_cql(spaces: &[String], query: &str) -> String {
+pub fn build_text_cql(spaces: &[String], query: &str, labels: &[String]) -> String {
+    let label = if labels.is_empty() {
+        String::new()
+    } else {
+        format!(" AND {}", label_clause(labels))
+    };
     format!(
-        "{} AND type = page AND text ~ \"{}\" ORDER BY lastmodified DESC",
+        "{} AND type = page AND text ~ \"{}\"{} ORDER BY lastmodified DESC",
         space_clause(spaces),
-        escape_cql(query)
+        escape_cql(query),
+        label
+    )
+}
+
+/// Build a CQL query that matches pages by label without a text query.
+pub fn build_label_cql(spaces: &[String], labels: &[String]) -> String {
+    format!(
+        "{} AND type = page AND {} ORDER BY lastmodified DESC",
+        space_clause(spaces),
+        label_clause(labels)
     )
 }
 
@@ -59,13 +92,14 @@ pub fn build_cql_queries(
     spaces: &[String],
     query: &str,
     search_in: &SearchIn,
+    labels: &[String],
 ) -> Vec<(SearchIn, String)> {
     match search_in {
-        SearchIn::Title => vec![(SearchIn::Title, build_title_cql(spaces, query))],
-        SearchIn::Text => vec![(SearchIn::Text, build_text_cql(spaces, query))],
+        SearchIn::Title => vec![(SearchIn::Title, build_title_cql(spaces, query, labels))],
+        SearchIn::Text => vec![(SearchIn::Text, build_text_cql(spaces, query, labels))],
         SearchIn::Both => vec![
-            (SearchIn::Title, build_title_cql(spaces, query)),
-            (SearchIn::Text, build_text_cql(spaces, query)),
+            (SearchIn::Title, build_title_cql(spaces, query, labels)),
+            (SearchIn::Text, build_text_cql(spaces, query, labels)),
         ],
     }
 }
@@ -131,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_build_title_cql_single_space() {
-        let cql = build_title_cql(&["DEV".to_string()], "Redis");
+        let cql = build_title_cql(&["DEV".to_string()], "Redis", &[]);
         assert_eq!(
             cql,
             r#"space = "DEV" AND type = page AND title ~ "Redis" ORDER BY lastmodified DESC"#
@@ -149,10 +183,40 @@ mod tests {
 
     #[test]
     fn test_build_text_cql_multi_space() {
-        let cql = build_text_cql(&["DEV".to_string(), "ARCH".to_string()], "Redis");
+        let cql = build_text_cql(&["DEV".to_string(), "ARCH".to_string()], "Redis", &[]);
         assert_eq!(
             cql,
             r#"space in ("DEV", "ARCH") AND type = page AND text ~ "Redis" ORDER BY lastmodified DESC"#
+        );
+    }
+
+    #[test]
+    fn test_build_title_cql_single_label() {
+        let cql = build_title_cql(&["DEV".to_string()], "Redis", &["api".to_string()]);
+        assert_eq!(
+            cql,
+            r#"space = "DEV" AND type = page AND title ~ "Redis" AND label = "api" ORDER BY lastmodified DESC"#
+        );
+    }
+
+    #[test]
+    fn test_build_label_cql_multiple_labels() {
+        let cql = build_label_cql(
+            &["DEV".to_string()],
+            &["api".to_string(), "設計".to_string()],
+        );
+        assert_eq!(
+            cql,
+            r#"space = "DEV" AND type = page AND label in ("api", "設計") ORDER BY lastmodified DESC"#
+        );
+    }
+
+    #[test]
+    fn test_build_label_cql_escapes_label() {
+        let cql = build_label_cql(&["DEV".to_string()], &[r#"a"b\c"#.to_string()]);
+        assert_eq!(
+            cql,
+            r#"space = "DEV" AND type = page AND label = "a\"b\\c" ORDER BY lastmodified DESC"#
         );
     }
 
@@ -183,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_build_cql_queries_both() {
-        let qs = build_cql_queries(&["DEV".to_string()], "Redis", &SearchIn::Both);
+        let qs = build_cql_queries(&["DEV".to_string()], "Redis", &SearchIn::Both, &[]);
         assert_eq!(qs.len(), 2);
         assert_eq!(qs[0].0, SearchIn::Title);
         assert_eq!(qs[1].0, SearchIn::Text);
