@@ -84,18 +84,32 @@ pub fn default_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("cnowledje").join("config.toml"))
 }
 
-/// Load the named profile from a TOML config file, if it exists.
-fn load_file_config(profile: &str) -> Result<ProfileConfig, ConfluenceError> {
+/// Load the raw TOML configuration for a named profile.
+///
+/// Returns [`ProfileConfig::default`] when the config path cannot be resolved,
+/// the config file does not exist, or the named profile is absent.
+pub fn load_profile_config(profile: &str) -> Result<ProfileConfig, ConfluenceError> {
     let path = match default_config_path() {
-        Some(p) => p,
+        Some(path) => path,
         None => return Ok(ProfileConfig::default()),
     };
 
+    load_profile_config_at_path(profile, &path)
+}
+
+/// Load the raw TOML configuration for a named profile from `path`.
+///
+/// Returns [`ProfileConfig::default`] when the config file does not exist or
+/// the named profile is absent. Read and parse errors are returned unchanged.
+pub fn load_profile_config_at_path(
+    profile: &str,
+    path: &std::path::Path,
+) -> Result<ProfileConfig, ConfluenceError> {
     if !path.exists() {
         return Ok(ProfileConfig::default());
     }
 
-    let text = std::fs::read_to_string(&path).map_err(|e| {
+    let text = std::fs::read_to_string(path).map_err(|e| {
         ConfluenceError::ConfigError(format!("cannot read {}: {}", path.display(), e))
     })?;
 
@@ -115,7 +129,7 @@ fn load_file_config(profile: &str) -> Result<ProfileConfig, ConfluenceError> {
 /// 4. Hard-coded defaults
 pub fn load_config(profile: Option<&str>) -> Result<Config, ConfluenceError> {
     let profile = profile.unwrap_or("default");
-    let file = load_file_config(profile)?;
+    let file = load_profile_config(profile)?;
 
     let base_url = std::env::var("CONFLUENCE_BASE_URL")
         .ok()
@@ -195,7 +209,7 @@ pub fn delete_token_from_keyring(profile: &str) -> Result<(), ConfluenceError> {
 /// 4. Hard-coded defaults
 pub fn load_jira_config(profile: Option<&str>) -> Result<JiraConfig, ConfluenceError> {
     let profile = profile.unwrap_or("default");
-    let file = load_file_config(profile)?;
+    let file = load_profile_config(profile)?;
 
     let base_url = std::env::var("JIRA_BASE_URL")
         .ok()

@@ -1,46 +1,60 @@
 use clap::{Args, Parser, Subcommand};
 
-use cnowledje::types::{IssueFormat, PageFormat, SearchIn};
+use cnowledje::types::{IssueFormat, PageFormat, SearchIn, SearchSource};
 
 const MAIN_AFTER_HELP: &str = "\
 TYPICAL WORKFLOW:
-  1. Find candidate pages:   cnowledje search \"<keywords>\" --space <KEY> --json
-  2. Read the chosen page:   cnowledje page <ID>
-  3. Find candidate issues:  cnowledje jira search \"<keywords>\" --project <KEY> --json
-  4. Read the chosen issue:  cnowledje jira issue <KEY>
-  5. Cite the source (title/key, URL, last-modified/updated) in your answer.
+  1. Find candidates:      cnowledje search \"<keywords>\" --json
+     (searches Confluence and Jira; restrict with --source confluence|jira)
+  2. Read a page:          cnowledje page <ID>
+  3. Read an issue:        cnowledje issue <KEY>
+  4. Cite the source (title/key, URL, last-modified/updated) in your answer.
 
 Run `cnowledje <command> --help` for per-command options and examples.
 See `cnowledje config --help` for configuration and token management.
 See `cnowledje skill install --help` to install the bundled agent skill.";
 
-// NOTE: The JSON shape documented below must be kept in sync with SearchOutput / SearchResultOutput
-// in src/models.rs. Update both when the output types change.
+// NOTE: The JSON shape documented below must be kept in sync with UnifiedSearchOutput,
+// SearchOutput, SearchResultOutput, JiraSearchOutput, and JiraSearchResultOutput in
+// src/models.rs. Update both when the output types change.
 const SEARCH_AFTER_HELP: &str = "\
 EXAMPLES:
-  # Search title and body across the default space
+  # Search Confluence and Jira for matching keywords
   cnowledje search \"認証フロー\" --json
 
-  # Restrict to title matches in a specific space
-  cnowledje search \"Redis 設計\" --space DEV --in title --json
+  # Restrict to Confluence title matches in a specific space
+  cnowledje search \"Redis 設計\" --source confluence --space DEV --in title --json
 
-  # Search body text only
-  cnowledje search \"デプロイ手順\" --space OPS --in text --json
+  # Restrict to Jira and filter by status (repeatable; OR semantics)
+  cnowledje search \"login\" --source jira --project DEV --status \"In Progress\" --status Open
 
-  # Search across multiple spaces
+  # Search Jira using filters only (query omitted)
+  cnowledje search --project DEV --assignee jdoe --status Open --type Bug
+
+  # Search across multiple Confluence spaces
   cnowledje search \"API仕様\" --space DEV --space ARCH --json
 
 NOTES:
-  * --space is required unless default_space is configured; omitting it
-    without a default_space is an error.
-  * --limit is capped by the configured max_limit (default 50).
+  * --source confluence, --source jira, or --source all selects the backend(s).
+    Omitting --source requests both configured backends.
+  * --space and --in apply only to Confluence. --project, --status, --assignee,
+    --reporter, --type, and --label apply only to Jira. Passing flags for a
+    backend excluded by --source is an error.
+  * Without a query, at least one Jira filter is required. Filters-only searches
+    automatically search Jira alone only when --source is omitted and no
+    Confluence flag is given; otherwise a query is required for Confluence.
+  * A backend named by --source or with one of its flags is required to be
+    configured. Unpinned, unconfigured backends may be skipped with a warning.
+  * --space is required for Confluence unless default_space is configured;
+    --project is required for Jira unless jira_default_project is configured.
+  * Queries are generated internally as CQL/JQL; raw CQL and JQL are not supported.
+  * --limit is capped by each participating backend's configured max_limit
+    (default 50).
   * --json output shape:
-      { \"query\", \"spaces\", \"search_in\",
-        \"results\": [ { \"id\", \"title\", \"space_key\", \"space_name\",
-                       \"url\", \"last_modified\", \"matched_by\", \"excerpt\" } ] }
-    last_modified and excerpt may be null depending on the Confluence API.
-  * If a search returns 0 results, broaden it: shorten the keywords, use
-    --in both, or try other spaces with --space <KEY>.";
+      { \"query\", \"confluence\": { \"query\", \"spaces\", \"search_in\", \"results\": [...] } | null,
+        \"jira\": { \"query\", \"projects\", \"jql\", \"total\", \"results\": [...] } | null }
+    The Confluence and Jira result objects retain their existing fields. A
+    backend that was not searched is represented as null.";
 
 const PAGE_AFTER_HELP: &str = "\
 EXAMPLES:
@@ -71,8 +85,8 @@ NOTES:
 #[derive(Parser)]
 #[command(
     name = "cnowledje",
-    about = "Read-only Confluence CLI for Server/Data Center",
-    long_about = "cnowledje provides safe, read-only access to Confluence pages.\n\
+    about = "Read-only Confluence & Jira CLI for Server/Data Center",
+    long_about = "cnowledje provides safe, read-only access to Confluence pages and Jira issues.\n\
                   It uses GET requests only and never performs write operations.\n\
                   Designed for use by developers and AI agents.",
     after_long_help = MAIN_AFTER_HELP,
@@ -85,16 +99,16 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Search Confluence pages by title and/or text.
+    /// Search Confluence pages and Jira issues.
     Search(SearchArgs),
     /// Retrieve a Confluence page by ID or URL.
     Page(PageArgs),
+    /// Retrieve a Jira issue by key or URL (includes comments).
+    Issue(IssueArgs),
     /// Validate and display the current configuration.
     Config(ConfigArgs),
     /// Manage the bundled agent skill.
     Skill(SkillArgs),
-    /// Read-only access to Jira issues.
-    Jira(JiraArgs),
 }
 
 // ── search ────────────────────────────────────────────────────────────────────
@@ -102,16 +116,45 @@ pub enum Commands {
 #[derive(Args)]
 #[command(after_long_help = SEARCH_AFTER_HELP)]
 pub struct SearchArgs {
-    /// Search query string.
-    pub query: String,
+    /// Search keywords. Optional if at least one Jira filter flag is given
+    /// (then only Jira is searched).
+    pub query: Option<String>,
+
+    /// Backend(s) to search (default: all configured backends).
+    #[arg(long, value_enum)]
+    pub source: Option<SearchSource>,
 
     /// Space key(s) to search in. May be repeated: --space DEV --space ARCH
     #[arg(long = "space", short = 's')]
     pub spaces: Vec<String>,
 
-    /// Where to search: title, text, or both (default).
-    #[arg(long = "in", value_enum, default_value = "both")]
-    pub search_in: SearchIn,
+    /// Where to search in Confluence: title, text, or both (default).
+    #[arg(long = "in", value_enum)]
+    pub search_in: Option<SearchIn>,
+
+    /// Project key(s). May be repeated: --project DEV --project OPS
+    #[arg(long = "project", short = 'p')]
+    pub projects: Vec<String>,
+
+    /// Filter by status name. May be repeated (OR).
+    #[arg(long)]
+    pub status: Vec<String>,
+
+    /// Filter by assignee username.
+    #[arg(long)]
+    pub assignee: Option<String>,
+
+    /// Filter by reporter username.
+    #[arg(long)]
+    pub reporter: Option<String>,
+
+    /// Filter by issue type name. May be repeated (OR).
+    #[arg(long = "type", value_name = "TYPE")]
+    pub issue_types: Vec<String>,
+
+    /// Filter by label. May be repeated (OR).
+    #[arg(long = "label")]
+    pub labels: Vec<String>,
 
     /// Maximum number of results to return (default 10, max 50).
     #[arg(long, default_value = "10")]
@@ -167,50 +210,21 @@ impl PageArgs {
     }
 }
 
-// ── jira ──────────────────────────────────────────────────────────────────────
+// ── issue ────────────────────────────────────────────────────────────────────
 
-// NOTE: The JSON shape documented below must be kept in sync with JiraSearchOutput /
-// JiraSearchResultOutput in src/models.rs. Update both when the output types change.
-const JIRA_SEARCH_AFTER_HELP: &str = "\
-EXAMPLES:
-  # Search by keywords only
-  cnowledje jira search \"redis timeout\" --project DEV --json
-
-  # Filter by status (repeatable; OR semantics)
-  cnowledje jira search \"login\" --project DEV --status \"In Progress\" --status Open
-
-  # Filter by assignee, no keywords
-  cnowledje jira search --project DEV --assignee jdoe
-
-  # Filters only (query omitted)
-  cnowledje jira search --project DEV --status Open --type Bug
-
-NOTES:
-  * --project is required unless jira_default_project is configured.
-  * Queries are JQL generated internally; raw JQL input is not supported.
-    The generated JQL is echoed back in the \"jql\" field of the output.
-  * At least one of the query or a filter flag (--status/--assignee/
-    --reporter/--type/--label) must be given.
-  * --limit is capped by the configured max_limit (default 50).
-  * --json output shape:
-      { \"query\", \"projects\", \"jql\", \"total\",
-        \"results\": [ { \"key\", \"summary\", \"status\", \"issue_type\",
-                       \"priority\", \"assignee\", \"project_key\", \"url\",
-                       \"updated\" } ] }";
-
-const JIRA_ISSUE_AFTER_HELP: &str = "\
+const ISSUE_AFTER_HELP: &str = "\
 EXAMPLES:
   # Print issue content as Markdown (default), including comments
-  cnowledje jira issue PROJ-123
+  cnowledje issue PROJ-123
 
   # Fetch by URL instead of a key
-  cnowledje jira issue \"https://jira.example.com/browse/PROJ-123\"
+  cnowledje issue \"https://jira.example.com/browse/PROJ-123\"
 
   # Get structured JSON
-  cnowledje jira issue PROJ-123 --json
+  cnowledje issue PROJ-123 --json
 
   # Limit the combined description+comments length
-  cnowledje jira issue PROJ-123 --max-chars 10000
+  cnowledje issue PROJ-123 --max-chars 10000
 
 NOTES:
   * description and comments share a single --max-chars budget, further
@@ -220,66 +234,8 @@ NOTES:
   * Only /browse/<KEY> issue URLs are supported.";
 
 #[derive(Args)]
-pub struct JiraArgs {
-    #[command(subcommand)]
-    pub command: JiraSubcommand,
-}
-
-#[derive(Subcommand)]
-pub enum JiraSubcommand {
-    /// Search Jira issues with keywords and filters.
-    Search(JiraSearchArgs),
-    /// Retrieve a Jira issue by key or URL (includes comments).
-    Issue(JiraIssueArgs),
-}
-
-#[derive(Args)]
-#[command(after_long_help = JIRA_SEARCH_AFTER_HELP)]
-pub struct JiraSearchArgs {
-    /// Search keywords (matched against summary, description, and comments).
-    /// Optional if at least one filter flag is given.
-    pub query: Option<String>,
-
-    /// Project key(s). May be repeated: --project DEV --project OPS
-    #[arg(long = "project", short = 'p')]
-    pub projects: Vec<String>,
-
-    /// Filter by status name. May be repeated (OR).
-    #[arg(long)]
-    pub status: Vec<String>,
-
-    /// Filter by assignee username.
-    #[arg(long)]
-    pub assignee: Option<String>,
-
-    /// Filter by reporter username.
-    #[arg(long)]
-    pub reporter: Option<String>,
-
-    /// Filter by issue type name. May be repeated (OR).
-    #[arg(long = "type", value_name = "TYPE")]
-    pub issue_types: Vec<String>,
-
-    /// Filter by label. May be repeated (OR).
-    #[arg(long = "label")]
-    pub labels: Vec<String>,
-
-    /// Maximum number of results to return (default 10, max 50).
-    #[arg(long, default_value = "10")]
-    pub limit: u32,
-
-    /// Output results as JSON.
-    #[arg(long)]
-    pub json: bool,
-
-    /// Use a specific configuration profile.
-    #[arg(long)]
-    pub profile: Option<String>,
-}
-
-#[derive(Args)]
-#[command(after_long_help = JIRA_ISSUE_AFTER_HELP)]
-pub struct JiraIssueArgs {
+#[command(after_long_help = ISSUE_AFTER_HELP)]
+pub struct IssueArgs {
     /// Issue key (e.g. PROJ-123) or a Jira issue URL containing /browse/<KEY>.
     pub issue_key_or_url: String,
 
@@ -300,7 +256,7 @@ pub struct JiraIssueArgs {
     pub profile: Option<String>,
 }
 
-impl JiraIssueArgs {
+impl IssueArgs {
     /// Resolve the effective format, letting --json override --format.
     pub fn effective_format(&self) -> IssueFormat {
         if self.json {
@@ -379,9 +335,12 @@ pub enum ConfigSubcommand {
         /// Profile name to initialize (default: "default").
         #[arg(long, default_value = "default", value_parser = parse_profile_name)]
         profile: String,
-        /// Overwrite existing profile without confirmation prompt.
+        /// Configure the Confluence section (skips the interactive section prompt).
         #[arg(long)]
-        force: bool,
+        confluence: bool,
+        /// Configure the Jira section (skips the interactive section prompt).
+        #[arg(long)]
+        jira: bool,
     },
     /// Manage the API token stored in the system keyring.
     Token(TokenArgs),
@@ -413,4 +372,62 @@ pub enum TokenSubcommand {
         #[arg(long)]
         jira: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use cnowledje::types::SearchSource;
+
+    use super::{Cli, Commands, ConfigSubcommand};
+
+    #[test]
+    fn parses_flattened_issue_command() {
+        let cli = Cli::try_parse_from(["cnowledje", "issue", "PROJ-1"]).unwrap();
+
+        match cli.command {
+            Commands::Issue(args) => assert_eq!(args.issue_key_or_url, "PROJ-1"),
+            _ => panic!("expected the flattened issue command"),
+        }
+    }
+
+    #[test]
+    fn parses_unified_jira_search_with_source_and_filter() {
+        let cli = Cli::try_parse_from([
+            "cnowledje",
+            "search",
+            "q",
+            "--source",
+            "jira",
+            "--status",
+            "Open",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Search(args) => {
+                assert_eq!(args.source, Some(SearchSource::Jira));
+                assert_eq!(args.status, ["Open"]);
+            }
+            _ => panic!("expected the unified search command"),
+        }
+    }
+
+    #[test]
+    fn rejects_removed_jira_command_hierarchy() {
+        assert!(Cli::try_parse_from(["cnowledje", "jira", "search", "q"]).is_err());
+    }
+
+    #[test]
+    fn config_init_accepts_jira_section_flag_and_rejects_force() {
+        let cli = Cli::try_parse_from(["cnowledje", "config", "init", "--jira"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Config(config)
+                if matches!(config.command, ConfigSubcommand::Init { jira: true, .. })
+        ));
+
+        assert!(Cli::try_parse_from(["cnowledje", "config", "init", "--force"]).is_err());
+    }
 }

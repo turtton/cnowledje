@@ -7,17 +7,17 @@ use cli::{Cli, Commands, ConfigSubcommand, SkillSubcommand};
 use cnowledje::client::ConfluenceClient;
 use cnowledje::config::{
     default_config_path, delete_jira_token_from_keyring, delete_token_from_keyring, load_config,
-    load_jira_config, profile_exists, resolve_projects, resolve_spaces, save_profile_to_path,
-    store_jira_token_in_keyring, store_token_in_keyring, validate_projects, validate_spaces,
-    ProfileConfig, TokenSource,
+    load_jira_config, load_profile_config, profile_exists, resolve_projects, resolve_spaces,
+    save_profile_to_path, store_jira_token_in_keyring, store_token_in_keyring, validate_projects,
+    validate_spaces, Config, JiraConfig, TokenSource,
 };
 use cnowledje::cql::{build_exact_title_cql, build_text_cql, build_title_cql, extract_page_id};
 use cnowledje::error::ConfluenceError;
 use cnowledje::format::{
     make_issue_url, make_page_url, print_error_json, print_jira_issue_json,
-    print_jira_issue_markdown, print_jira_issue_plain, print_jira_search_human,
-    print_jira_search_json, print_page_json, print_page_markdown, print_page_plain,
-    print_page_storage_html, print_search_human, print_search_json,
+    print_jira_issue_markdown, print_jira_issue_plain, print_page_json, print_page_markdown,
+    print_page_plain, print_page_storage_html, print_unified_search_human,
+    print_unified_search_json,
 };
 use cnowledje::jira_client::JiraClient;
 use cnowledje::jql::{build_search_jql, extract_issue_key, JqlFilters};
@@ -25,10 +25,10 @@ use cnowledje::markdown;
 use cnowledje::models::SearchResult;
 use cnowledje::models::{
     JiraIssueOutput, JiraSearchOutput, JiraSearchResultOutput, PageOutput, SearchOutput,
-    SearchResultOutput, JIRA_NOTICE, NOTICE,
+    SearchResultOutput, UnifiedSearchOutput, JIRA_NOTICE, NOTICE,
 };
 use cnowledje::skill;
-use cnowledje::types::{IssueFormat, PageFormat, SearchIn};
+use cnowledje::types::{IssueFormat, PageFormat, SearchIn, SearchSource};
 
 #[tokio::main]
 async fn main() {
@@ -85,36 +85,20 @@ async fn main() {
                 1
             }
         },
-        Commands::Jira(args) => match args.command {
-            cli::JiraSubcommand::Search(a) => {
-                let json = a.json;
-                match run_jira_search(a).await {
-                    Ok(()) => 0,
-                    Err(e) => {
-                        if json {
-                            print_error_json(&e);
-                        } else {
-                            eprintln!("error: {}", e);
-                        }
-                        1
+        Commands::Issue(args) => {
+            let json = args.json || args.format == IssueFormat::Json;
+            match run_issue(args).await {
+                Ok(()) => 0,
+                Err(e) => {
+                    if json {
+                        print_error_json(&e);
+                    } else {
+                        eprintln!("error: {}", e);
                     }
+                    1
                 }
             }
-            cli::JiraSubcommand::Issue(a) => {
-                let json = a.json || a.format == IssueFormat::Json;
-                match run_jira_issue(a).await {
-                    Ok(()) => 0,
-                    Err(e) => {
-                        if json {
-                            print_error_json(&e);
-                        } else {
-                            eprintln!("error: {}", e);
-                        }
-                        1
-                    }
-                }
-            }
-        },
+        }
     };
 
     std::process::exit(exit_code);
@@ -122,115 +106,286 @@ async fn main() {
 
 // ── search command ────────────────────────────────────────────────────────────
 
-async fn run_search(args: cli::SearchArgs) -> Result<(), ConfluenceError> {
-    let config = load_config(args.profile.as_deref())?;
+#[derive(Debug, PartialEq, Eq)]
+struct SearchPlan {
+    confluence: bool,
+    jira: bool,
+}
 
-    // Enforce limit
-    if args.limit > config.max_limit {
-        return Err(ConfluenceError::LimitExceeded {
-            requested: args.limit,
-            max: config.max_limit,
-        });
+fn plan_search_sources(
+    source: Option<SearchSource>,
+    query_present: bool,
+    confluence_flags: bool,
+    jira_flags: bool,
+) -> Result<SearchPlan, ConfluenceError> {
+    let (mut confluence, jira) = match source {
+        None | Some(SearchSource::All) => (true, true),
+        Some(SearchSource::Confluence) => (true, false),
+        Some(SearchSource::Jira) => (false, true),
+    };
+
+    if !confluence && confluence_flags {
+        return Err(ConfluenceError::InvalidArguments(
+            "--space/--in apply to Confluence but --source jira excludes it".into(),
+        ));
+    }
+    if !jira && jira_flags {
+        return Err(ConfluenceError::InvalidArguments(
+            "--project/--status/--assignee/--reporter/--type/--label apply to Jira but --source confluence excludes it".into(),
+        ));
     }
 
-    let spaces = resolve_spaces(args.spaces, &config)?;
-    validate_spaces(&spaces, &config)?;
-
-    let client = ConfluenceClient::new(&config.base_url, &config.api_path, &config.token)?;
-
-    // Internal fetch limit: fetch more to allow dedup and still meet user's limit.
-    let internal_limit = std::cmp::min(args.limit * 2, config.max_limit);
-
-    // -- Execute searches ------------------------------------------------------
-    let (title_results, text_results) = match &args.search_in {
-        SearchIn::Title => {
-            let cql = build_title_cql(&spaces, &args.query);
-            let resp = client.search(&cql, internal_limit).await?;
-            (resp.results, vec![])
+    if !query_present {
+        if !jira_flags {
+            return Err(ConfluenceError::NoSearchCriteria);
         }
-        SearchIn::Text => {
-            let cql = build_text_cql(&spaces, &args.query);
-            let resp = client.search(&cql, internal_limit).await?;
-            (vec![], resp.results)
+        if confluence && (source.is_some() || confluence_flags) {
+            return Err(ConfluenceError::QueryRequiredForConfluence);
         }
-        SearchIn::Both => {
-            let title_cql = build_title_cql(&spaces, &args.query);
-            let text_cql = build_text_cql(&spaces, &args.query);
-            // Run both requests concurrently.
-            let (tr, xr) = tokio::try_join!(
-                client.search(&title_cql, internal_limit),
-                client.search(&text_cql, internal_limit)
+        confluence = false;
+    }
+
+    Ok(SearchPlan { confluence, jira })
+}
+
+async fn run_search(args: cli::SearchArgs) -> Result<(), ConfluenceError> {
+    let query_present = args
+        .query
+        .as_deref()
+        .map(|query| !query.trim().is_empty())
+        .unwrap_or(false);
+    let confluence_flags = !args.spaces.is_empty() || args.search_in.is_some();
+    let jira_flags = !args.projects.is_empty()
+        || !args.status.is_empty()
+        || args.assignee.is_some()
+        || args.reporter.is_some()
+        || !args.issue_types.is_empty()
+        || !args.labels.is_empty();
+    let plan = plan_search_sources(args.source, query_present, confluence_flags, jira_flags)?;
+
+    let confluence_pinned = matches!(
+        args.source,
+        Some(SearchSource::Confluence | SearchSource::All)
+    ) || confluence_flags;
+    let jira_pinned =
+        matches!(args.source, Some(SearchSource::Jira | SearchSource::All)) || jira_flags;
+    let mut first_skipped_error = None;
+
+    let confluence_leg = if plan.confluence {
+        match load_config(args.profile.as_deref()) {
+            Ok(config) => {
+                if args.limit > config.max_limit {
+                    return Err(ConfluenceError::LimitExceeded {
+                        requested: args.limit,
+                        max: config.max_limit,
+                    });
+                }
+                match resolve_spaces(args.spaces.clone(), &config) {
+                    Ok(spaces) => {
+                        validate_spaces(&spaces, &config)?;
+                        Some((
+                            config,
+                            spaces,
+                            args.search_in.clone().unwrap_or(SearchIn::Both),
+                        ))
+                    }
+                    Err(error @ ConfluenceError::NoSpaceSpecified) if !confluence_pinned => {
+                        eprintln!(
+                            "warning: no space specified and no default_space configured; skipping Confluence"
+                        );
+                        first_skipped_error = Some(error);
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error @ ConfluenceError::MissingBaseUrl) if !confluence_pinned => {
+                eprintln!("warning: Confluence is not configured; skipping");
+                first_skipped_error = Some(error);
+                None
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+
+    let jira_leg = if plan.jira {
+        match load_jira_config(args.profile.as_deref()) {
+            Ok(config) => {
+                if args.limit > config.max_limit {
+                    return Err(ConfluenceError::LimitExceeded {
+                        requested: args.limit,
+                        max: config.max_limit,
+                    });
+                }
+                match resolve_projects(args.projects.clone(), &config) {
+                    Ok(projects) => {
+                        validate_projects(&projects, &config)?;
+                        Some((config, projects))
+                    }
+                    Err(error @ ConfluenceError::NoProjectSpecified) if !jira_pinned => {
+                        eprintln!(
+                            "warning: no project specified and no jira_default_project configured; skipping Jira"
+                        );
+                        if first_skipped_error.is_none() {
+                            first_skipped_error = Some(error);
+                        }
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error @ ConfluenceError::MissingJiraBaseUrl) if !jira_pinned => {
+                eprintln!("warning: Jira is not configured; skipping");
+                if first_skipped_error.is_none() {
+                    first_skipped_error = Some(error);
+                }
+                None
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+
+    let filters = JqlFilters {
+        statuses: &args.status,
+        assignee: args.assignee.as_deref(),
+        reporter: args.reporter.as_deref(),
+        issue_types: &args.issue_types,
+        labels: &args.labels,
+    };
+    let (confluence, jira) = match (confluence_leg, jira_leg) {
+        (Some((confluence_config, spaces, search_in)), Some((jira_config, projects))) => {
+            let query = args.query.as_deref().expect("Confluence requires a query");
+            let (confluence, jira) = tokio::try_join!(
+                search_confluence(&confluence_config, query, spaces, &search_in, args.limit,),
+                search_jira(
+                    &jira_config,
+                    args.query.as_deref(),
+                    projects,
+                    &filters,
+                    args.limit,
+                ),
             )?;
-            (tr.results, xr.results)
+            (Some(confluence), Some(jira))
+        }
+        (Some((config, spaces, search_in)), None) => {
+            let query = args.query.as_deref().expect("Confluence requires a query");
+            let output = search_confluence(&config, query, spaces, &search_in, args.limit).await?;
+            (Some(output), None)
+        }
+        (None, Some((config, projects))) => {
+            let output = search_jira(
+                &config,
+                args.query.as_deref(),
+                projects,
+                &filters,
+                args.limit,
+            )
+            .await?;
+            (None, Some(output))
+        }
+        (None, None) => {
+            return Err(first_skipped_error.expect("a skipped backend records its error"))
         }
     };
 
-    // -- Merge with dedup and matched_by tracking -----------------------------
-    let mut seen: HashSet<String> = HashSet::new();
-    // id → vec of matched_by strings
-    let mut matched_by: HashMap<String, Vec<String>> = HashMap::new();
-    let mut order: Vec<String> = Vec::new();
+    let output = UnifiedSearchOutput {
+        query: args.query.clone(),
+        confluence,
+        jira,
+    };
+    if args.json {
+        print_unified_search_json(&output)?;
+    } else {
+        print_unified_search_human(&output);
+    }
 
-    for r in &title_results {
-        if seen.insert(r.id.clone()) {
-            order.push(r.id.clone());
+    Ok(())
+}
+
+async fn search_confluence(
+    config: &Config,
+    query: &str,
+    spaces: Vec<String>,
+    search_in: &SearchIn,
+    limit: u32,
+) -> Result<SearchOutput, ConfluenceError> {
+    let client = ConfluenceClient::new(&config.base_url, &config.api_path, &config.token)?;
+    let internal_limit = std::cmp::min(limit * 2, config.max_limit);
+    let (title_results, text_results) = match search_in {
+        SearchIn::Title => {
+            let cql = build_title_cql(&spaces, query);
+            let response = client.search(&cql, internal_limit).await?;
+            (response.results, vec![])
+        }
+        SearchIn::Text => {
+            let cql = build_text_cql(&spaces, query);
+            let response = client.search(&cql, internal_limit).await?;
+            (vec![], response.results)
+        }
+        SearchIn::Both => {
+            let title_cql = build_title_cql(&spaces, query);
+            let text_cql = build_text_cql(&spaces, query);
+            let (title_response, text_response) = tokio::try_join!(
+                client.search(&title_cql, internal_limit),
+                client.search(&text_cql, internal_limit)
+            )?;
+            (title_response.results, text_response.results)
+        }
+    };
+
+    let mut seen = HashSet::new();
+    let mut matched_by: HashMap<String, Vec<String>> = HashMap::new();
+    let mut order = Vec::new();
+    for result in &title_results {
+        if seen.insert(result.id.clone()) {
+            order.push(result.id.clone());
         }
         matched_by
-            .entry(r.id.clone())
+            .entry(result.id.clone())
             .or_default()
             .push("title".to_string());
     }
-    for r in &text_results {
-        if seen.insert(r.id.clone()) {
-            order.push(r.id.clone());
+    for result in &text_results {
+        if seen.insert(result.id.clone()) {
+            order.push(result.id.clone());
         }
         matched_by
-            .entry(r.id.clone())
+            .entry(result.id.clone())
             .or_default()
             .push("text".to_string());
     }
 
-    // Build a lookup so we can retrieve results by id.
     let all_results: HashMap<String, &SearchResult> = title_results
         .iter()
         .chain(text_results.iter())
-        .map(|r| (r.id.clone(), r))
+        .map(|result| (result.id.clone(), result))
         .collect();
-
-    // Apply user limit.
-    let output_results: Vec<SearchResultOutput> = order
+    let results = order
         .iter()
-        .take(args.limit as usize)
+        .take(limit as usize)
         .filter_map(|id| all_results.get(id).copied())
-        .map(|r| {
-            let url = make_page_url(&config.base_url, None, r.links.webui.as_deref());
-            SearchResultOutput {
-                id: r.id.clone(),
-                title: r.title.clone(),
-                space_key: r.space.key.clone(),
-                space_name: r.space.name.clone(),
-                url,
-                last_modified: r.version.when.clone(),
-                matched_by: matched_by.get(&r.id).cloned().unwrap_or_default(),
-                excerpt: r.excerpt.clone(),
-            }
+        .map(|result| SearchResultOutput {
+            id: result.id.clone(),
+            title: result.title.clone(),
+            space_key: result.space.key.clone(),
+            space_name: result.space.name.clone(),
+            url: make_page_url(&config.base_url, None, result.links.webui.as_deref()),
+            last_modified: result.version.when.clone(),
+            matched_by: matched_by.get(&result.id).cloned().unwrap_or_default(),
+            excerpt: result.excerpt.clone(),
         })
         .collect();
 
-    let output = SearchOutput {
-        query: args.query.clone(),
+    Ok(SearchOutput {
+        query: query.to_string(),
         spaces,
-        search_in: args.search_in.to_string(),
-        results: output_results,
-    };
-
-    if args.json {
-        print_search_json(&output)?;
-    } else {
-        print_search_human(&output);
-    }
-
-    Ok(())
+        search_in: search_in.to_string(),
+        results,
+    })
 }
 
 // ── page command ──────────────────────────────────────────────────────────────
@@ -341,84 +496,58 @@ async fn run_page(args: cli::PageArgs) -> Result<(), ConfluenceError> {
     Ok(())
 }
 
-// ── jira search command ──────────────────────────────────────────────────────
+// ── Jira search helper ──────────────────────────────────────────────────────
 
-async fn run_jira_search(args: cli::JiraSearchArgs) -> Result<(), ConfluenceError> {
-    let config = load_jira_config(args.profile.as_deref())?;
-
-    if args.limit > config.max_limit {
-        return Err(ConfluenceError::LimitExceeded {
-            requested: args.limit,
-            max: config.max_limit,
-        });
-    }
-
-    let projects = resolve_projects(args.projects, &config)?;
-    validate_projects(&projects, &config)?;
-
-    let filters = JqlFilters {
-        statuses: &args.status,
-        assignee: args.assignee.as_deref(),
-        reporter: args.reporter.as_deref(),
-        issue_types: &args.issue_types,
-        labels: &args.labels,
-    };
-    let query_is_empty = args
-        .query
-        .as_deref()
-        .map(|q| q.trim().is_empty())
-        .unwrap_or(true);
-    if query_is_empty && filters.is_empty() {
-        return Err(ConfluenceError::NoSearchCriteria);
-    }
-
-    let jql = build_search_jql(&projects, args.query.as_deref(), &filters);
-
+async fn search_jira(
+    config: &JiraConfig,
+    query: Option<&str>,
+    projects: Vec<String>,
+    filters: &JqlFilters<'_>,
+    limit: u32,
+) -> Result<JiraSearchOutput, ConfluenceError> {
+    let jql = build_search_jql(&projects, query, filters);
     let client = JiraClient::new(&config.base_url, &config.api_path, &config.token)?;
-    let response = client.search(&jql, args.limit).await?;
-
-    let results: Vec<JiraSearchResultOutput> = response
+    let response = client.search(&jql, limit).await?;
+    let results = response
         .issues
         .iter()
         .map(|issue| {
-            let f = &issue.fields;
+            let fields = &issue.fields;
             JiraSearchResultOutput {
                 key: issue.key.clone(),
-                summary: f.summary.clone().unwrap_or_default(),
-                status: f.status.as_ref().map(|s| s.name.clone()),
-                issue_type: f.issuetype.as_ref().map(|t| t.name.clone()),
-                priority: f.priority.as_ref().map(|p| p.name.clone()),
-                assignee: f
+                summary: fields.summary.clone().unwrap_or_default(),
+                status: fields.status.as_ref().map(|status| status.name.clone()),
+                issue_type: fields
+                    .issuetype
+                    .as_ref()
+                    .map(|issue_type| issue_type.name.clone()),
+                priority: fields
+                    .priority
+                    .as_ref()
+                    .map(|priority| priority.name.clone()),
+                assignee: fields
                     .assignee
                     .as_ref()
-                    .and_then(|u| u.display_name.clone().or_else(|| u.name.clone())),
-                project_key: f.project.as_ref().map(|p| p.key.clone()),
+                    .and_then(|user| user.display_name.clone().or_else(|| user.name.clone())),
+                project_key: fields.project.as_ref().map(|project| project.key.clone()),
                 url: make_issue_url(&config.base_url, &issue.key),
-                updated: f.updated.clone(),
+                updated: fields.updated.clone(),
             }
         })
         .collect();
 
-    let output = JiraSearchOutput {
-        query: args.query.clone(),
+    Ok(JiraSearchOutput {
+        query: query.map(str::to_string),
         projects,
         jql,
         total: response.total,
         results,
-    };
-
-    if args.json {
-        print_jira_search_json(&output)?;
-    } else {
-        print_jira_search_human(&output);
-    }
-
-    Ok(())
+    })
 }
 
-// ── jira issue command ───────────────────────────────────────────────────────
+// ── issue command ───────────────────────────────────────────────────────────
 
-async fn run_jira_issue(args: cli::JiraIssueArgs) -> Result<(), ConfluenceError> {
+async fn run_issue(args: cli::IssueArgs) -> Result<(), ConfluenceError> {
     let config = load_jira_config(args.profile.as_deref())?;
     let key = extract_issue_key(&args.issue_key_or_url)?;
 
@@ -639,8 +768,12 @@ async fn run_config(args: cli::ConfigArgs) -> Result<(), ConfluenceError> {
                 return Err(e);
             }
         }
-        ConfigSubcommand::Init { profile, force } => {
-            run_config_init(profile, force)?;
+        ConfigSubcommand::Init {
+            profile,
+            confluence,
+            jira,
+        } => {
+            run_config_init(profile, confluence, jira)?;
         }
         ConfigSubcommand::Token(token_args) => {
             run_config_token(token_args)?;
@@ -712,382 +845,426 @@ fn run_config_token(args: cli::TokenArgs) -> Result<(), ConfluenceError> {
 
 // ── config init command ───────────────────────────────────────────────────────
 
-fn run_config_init(profile: String, force: bool) -> Result<(), ConfluenceError> {
+fn run_config_init(profile: String, confluence: bool, jira: bool) -> Result<(), ConfluenceError> {
     use inquire::error::InquireError;
     use inquire::validator::Validation;
     use inquire::{Confirm, CustomType, Password, Text};
 
     let profile_name = profile.as_str();
-
     let config_path = default_config_path().ok_or_else(|| {
         ConfluenceError::ConfigError("設定ファイルのパスを決定できません".to_string())
     })?;
-
-    if !force {
-        let exists = profile_exists(profile_name)?;
-        if exists {
-            let answer = Confirm::new(&format!(
-                "Profile '{}' already exists. Overwrite?",
-                profile_name
-            ))
-            .with_default(false)
-            .prompt();
-            match answer {
-                Ok(true) => {}
-                Ok(false) => {
-                    println!("キャンセルされました");
-                    return Ok(());
-                }
-                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-                    println!("\nキャンセルされました");
-                    return Ok(());
-                }
-                Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
-            }
-        }
-    }
+    let existing = load_profile_config(profile_name)?;
+    let profile_exists = profile_exists(profile_name)?;
+    let has_confluence = existing.base_url.is_some();
+    let has_jira = existing.jira_base_url.is_some();
 
     println!(
         "プロファイル '{}' を初期化します。Ctrl-C または Esc でキャンセルできます。\n",
         profile_name
     );
 
-    let base_url = match Text::new("Base URL (e.g. https://confluence.example.com):")
-        .with_validator(|s: &str| match url::Url::parse(s.trim()) {
-            Ok(u)
-                if matches!(u.scheme(), "http" | "https")
-                    && u.host_str().is_some()
-                    && u.username().is_empty()
-                    && u.password().is_none()
-                    && u.query().is_none()
-                    && u.fragment().is_none() =>
-            {
-                Ok(Validation::Valid)
-            }
-            Ok(_) => Ok(Validation::Invalid(
-                "http:// または https://host/path 形式の URL を入力してください（認証情報・クエリ不可）"
-                    .into(),
-            )),
-            Err(_) => Ok(Validation::Invalid(
-                "有効な URL を入力してください".into(),
-            )),
-        })
-        .prompt()
-    {
-        Ok(v) => v.trim().to_string(),
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-            println!("\nキャンセルされました");
-            return Ok(());
+    let (configure_confluence, configure_jira) = if confluence || jira {
+        (confluence, jira)
+    } else {
+        let confluence_help = existing
+            .base_url
+            .as_deref()
+            .map(|base_url| format!("現在の Base URL: {base_url}"));
+        let mut confluence_prompt =
+            Confirm::new("Confluence を設定しますか?").with_default(!has_confluence);
+        if let Some(help) = confluence_help.as_deref() {
+            confluence_prompt = confluence_prompt.with_help_message(help);
         }
-        Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+        let configure_confluence = match confluence_prompt.prompt() {
+            Ok(answer) => answer,
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました");
+                return Ok(());
+            }
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+        };
+
+        let jira_help = existing
+            .jira_base_url
+            .as_deref()
+            .map(|base_url| format!("現在の Jira Base URL: {base_url}"));
+        let mut jira_prompt = Confirm::new("Jira を設定しますか?").with_default(!has_jira);
+        if let Some(help) = jira_help.as_deref() {
+            jira_prompt = jira_prompt.with_help_message(help);
+        }
+        let configure_jira = match jira_prompt.prompt() {
+            Ok(answer) => answer,
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました");
+                return Ok(());
+            }
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+        };
+        (configure_confluence, configure_jira)
     };
 
-    let api_path = match Text::new("API path:")
-        .with_default("/rest/api")
-        .with_validator(|s: &str| {
-            let t = s.trim();
-            if t.is_empty() {
-                Ok(Validation::Invalid("API パスを入力してください".into()))
-            } else if !t.starts_with('/') {
-                Ok(Validation::Invalid("API パスは / で始めてください".into()))
-            } else {
-                Ok(Validation::Valid)
-            }
-        })
-        .prompt()
-    {
-        Ok(v) => v.trim().to_string(),
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-            println!("\nキャンセルされました");
-            return Ok(());
-        }
-        Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
-    };
+    if !configure_confluence && !configure_jira {
+        println!("変更する項目がありません。");
+        return Ok(());
+    }
 
-    let allowed_spaces: Option<Vec<String>> = match Text::new(
-        "Allowed spaces (comma-separated, e.g. DEV,ARCH — leave blank to allow all):",
-    )
-    .prompt_skippable()
-    {
-        Ok(Some(s)) => {
-            let spaces: Vec<String> = s
-                .split(',')
-                .map(|k| k.trim().to_string())
-                .filter(|k| !k.is_empty())
-                .collect();
-            if spaces.is_empty() {
-                None
-            } else {
-                Some(spaces)
+    let confluence_values = if configure_confluence {
+        let mut base_url_prompt = Text::new("Base URL (e.g. https://confluence.example.com):")
+            .with_validator(|value: &str| match url::Url::parse(value.trim()) {
+                Ok(url)
+                    if matches!(url.scheme(), "http" | "https")
+                        && url.host_str().is_some()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && url.query().is_none()
+                        && url.fragment().is_none() =>
+                {
+                    Ok(Validation::Valid)
+                }
+                Ok(_) => Ok(Validation::Invalid(
+                    "http:// または https://host/path 形式の URL を入力してください（認証情報・クエリ不可）"
+                        .into(),
+                )),
+                Err(_) => Ok(Validation::Invalid("有効な URL を入力してください".into())),
+            });
+        if let Some(base_url) = existing.base_url.as_deref() {
+            base_url_prompt = base_url_prompt.with_default(base_url);
+        }
+        let base_url = match base_url_prompt.prompt() {
+            Ok(value) => value.trim().to_string(),
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました");
+                return Ok(());
             }
-        }
-        Ok(None) => None,
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-            println!("\nキャンセルされました");
-            return Ok(());
-        }
-        Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
-    };
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+        };
 
-    // 4. default_space (optional)
-    let default_space: Option<String> =
-        match Text::new("Default space key (optional — leave blank to skip):").prompt_skippable()
+        let api_path_default = existing.api_path.as_deref().unwrap_or("/rest/api");
+        let api_path = match Text::new("API path:")
+            .with_default(api_path_default)
+            .with_validator(|value: &str| {
+                let value = value.trim();
+                if value.is_empty() {
+                    Ok(Validation::Invalid("API パスを入力してください".into()))
+                } else if !value.starts_with('/') {
+                    Ok(Validation::Invalid("API パスは / で始めてください".into()))
+                } else {
+                    Ok(Validation::Valid)
+                }
+            })
+            .prompt()
         {
-            Ok(Some(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            Ok(value) => value.trim().to_string(),
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました");
+                return Ok(());
+            }
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+        };
+
+        let allowed_spaces_default = existing
+            .allowed_spaces
+            .as_ref()
+            .map(|spaces| spaces.join(","));
+        let mut allowed_spaces_prompt = Text::new(
+            "Allowed spaces (comma-separated, e.g. DEV,ARCH — leave blank to allow all):",
+        );
+        if let Some(default) = allowed_spaces_default.as_deref() {
+            allowed_spaces_prompt = allowed_spaces_prompt.with_default(default);
+        }
+        let allowed_spaces = match allowed_spaces_prompt.prompt_skippable() {
+            Ok(Some(value)) => {
+                let spaces = value
+                    .split(',')
+                    .map(|space| space.trim().to_string())
+                    .filter(|space| !space.is_empty())
+                    .collect::<Vec<_>>();
+                (!spaces.is_empty()).then_some(spaces)
+            }
+            Ok(None) => None,
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました");
+                return Ok(());
+            }
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+        };
+
+        let mut default_space_prompt =
+            Text::new("Default space key (optional — leave blank to skip):");
+        if let Some(default) = existing.default_space.as_deref() {
+            default_space_prompt = default_space_prompt.with_default(default);
+        }
+        let default_space = match default_space_prompt.prompt_skippable() {
+            Ok(Some(value)) if !value.trim().is_empty() => Some(value.trim().to_string()),
             Ok(_) => None,
             Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                 println!("\nキャンセルされました");
                 return Ok(());
             }
-            Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+        };
+        Some((base_url, api_path, allowed_spaces, default_space))
+    } else {
+        None
+    };
+
+    let jira_values = if configure_jira {
+        let mut base_url_prompt = Text::new("Jira Base URL (e.g. https://jira.example.com):")
+            .with_validator(|value: &str| match url::Url::parse(value.trim()) {
+                Ok(url)
+                    if matches!(url.scheme(), "http" | "https")
+                        && url.host_str().is_some()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && url.query().is_none()
+                        && url.fragment().is_none() =>
+                {
+                    Ok(Validation::Valid)
+                }
+                Ok(_) => Ok(Validation::Invalid(
+                    "http:// または https://host/path 形式の URL を入力してください（認証情報・クエリ不可）"
+                        .into(),
+                )),
+                Err(_) => Ok(Validation::Invalid("有効な URL を入力してください".into())),
+            });
+        if let Some(base_url) = existing.jira_base_url.as_deref() {
+            base_url_prompt = base_url_prompt.with_default(base_url);
+        }
+        let base_url = match base_url_prompt.prompt() {
+            Ok(value) => value.trim().to_string(),
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました");
+                return Ok(());
+            }
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
         };
 
-    // 5. default_limit (u32, default 10)
-    let default_limit: u32 = match CustomType::<u32>::new("Default result limit:")
-        .with_default(10)
-        .with_parser(&|s: &str| s.trim().parse::<u32>().map_err(|_| ()))
-        .with_error_message("正の整数を入力してください")
-        .with_validator(|&n: &u32| {
-            if n >= 1 {
-                Ok(Validation::Valid)
-            } else {
-                Ok(Validation::Invalid("1 以上の値を入力してください".into()))
+        let api_path_default = existing.jira_api_path.as_deref().unwrap_or("/rest/api/2");
+        let api_path = match Text::new("Jira API path:")
+            .with_default(api_path_default)
+            .with_validator(|value: &str| {
+                let value = value.trim();
+                if value.is_empty() {
+                    Ok(Validation::Invalid("API パスを入力してください".into()))
+                } else if !value.starts_with('/') {
+                    Ok(Validation::Invalid("API パスは / で始めてください".into()))
+                } else {
+                    Ok(Validation::Valid)
+                }
+            })
+            .prompt()
+        {
+            Ok(value) => value.trim().to_string(),
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました");
+                return Ok(());
             }
-        })
-        .prompt()
-    {
-        Ok(v) => v,
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-            println!("\nキャンセルされました");
-            return Ok(());
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+        };
+
+        let allowed_projects_default = existing
+            .jira_allowed_projects
+            .as_ref()
+            .map(|projects| projects.join(","));
+        let mut allowed_projects_prompt =
+            Text::new("Allowed projects (comma-separated — leave blank to allow all):");
+        if let Some(default) = allowed_projects_default.as_deref() {
+            allowed_projects_prompt = allowed_projects_prompt.with_default(default);
         }
-        Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+        let allowed_projects = match allowed_projects_prompt.prompt_skippable() {
+            Ok(Some(value)) => {
+                let projects = value
+                    .split(',')
+                    .map(|project| project.trim().to_string())
+                    .filter(|project| !project.is_empty())
+                    .collect::<Vec<_>>();
+                (!projects.is_empty()).then_some(projects)
+            }
+            Ok(None) => None,
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました");
+                return Ok(());
+            }
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+        };
+
+        let mut default_project_prompt = Text::new("Default project key (optional):");
+        if let Some(default) = existing.jira_default_project.as_deref() {
+            default_project_prompt = default_project_prompt.with_default(default);
+        }
+        let default_project = match default_project_prompt.prompt_skippable() {
+            Ok(Some(value)) if !value.trim().is_empty() => Some(value.trim().to_string()),
+            Ok(_) => None,
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました");
+                return Ok(());
+            }
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+        };
+        Some((base_url, api_path, allowed_projects, default_project))
+    } else {
+        None
     };
 
-    // 6. max_limit (u32, default 50, >= default_limit)
-    let max_limit: u32 = match CustomType::<u32>::new("Maximum result limit:")
-        .with_default(50)
-        .with_parser(&|s: &str| s.trim().parse::<u32>().map_err(|_| ()))
-        .with_error_message("正の整数を入力してください")
-        .with_validator(move |&n: &u32| {
-            if n >= default_limit {
-                Ok(Validation::Valid)
-            } else {
-                Ok(Validation::Invalid(
-                    format!(
-                        "{} 以上の値を入力してください (>= default_limit)",
-                        default_limit
-                    )
-                    .into(),
-                ))
+    let update_common_settings = if profile_exists {
+        match Confirm::new("共通設定 (default_limit / max_limit / max_page_chars) を変更しますか?")
+            .with_default(false)
+            .prompt()
+        {
+            Ok(answer) => answer,
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました");
+                return Ok(());
             }
-        })
-        .prompt()
-    {
-        Ok(v) => v,
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-            println!("\nキャンセルされました");
-            return Ok(());
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
         }
-        Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+    } else {
+        true
     };
-
-    // 7. max_page_chars (usize, default 50000, min 1000)
-    let max_page_chars: usize =
-        match CustomType::<usize>::new("Maximum page content length (characters):")
-            .with_default(50_000)
-            .with_parser(&|s: &str| s.trim().parse::<usize>().map_err(|_| ()))
+    let common_values = if update_common_settings {
+        let default_limit = match CustomType::<u32>::new("Default result limit:")
+            .with_default(existing.default_limit.unwrap_or(10))
+            .with_parser(&|value: &str| value.trim().parse::<u32>().map_err(|_| ()))
             .with_error_message("正の整数を入力してください")
-            .with_validator(|&n: &usize| {
-                if n >= 1_000 {
+            .with_validator(|&value: &u32| {
+                if value >= 1 {
+                    Ok(Validation::Valid)
+                } else {
+                    Ok(Validation::Invalid("1 以上の値を入力してください".into()))
+                }
+            })
+            .prompt()
+        {
+            Ok(value) => value,
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました");
+                return Ok(());
+            }
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+        };
+        let max_limit = match CustomType::<u32>::new("Maximum result limit:")
+            .with_default(existing.max_limit.unwrap_or(50))
+            .with_parser(&|value: &str| value.trim().parse::<u32>().map_err(|_| ()))
+            .with_error_message("正の整数を入力してください")
+            .with_validator(move |&value: &u32| {
+                if value >= default_limit {
                     Ok(Validation::Valid)
                 } else {
                     Ok(Validation::Invalid(
-                        "1000 以上の値を入力してください".into(),
+                        format!(
+                            "{} 以上の値を入力してください (>= default_limit)",
+                            default_limit
+                        )
+                        .into(),
                     ))
                 }
             })
             .prompt()
         {
-            Ok(v) => v,
+            Ok(value) => value,
             Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                 println!("\nキャンセルされました");
                 return Ok(());
             }
-            Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
         };
-
-    // Jira (optional)
-    let mut jira_base_url: Option<String> = None;
-    let mut jira_api_path: Option<String> = None;
-    let mut jira_allowed_projects: Option<Vec<String>> = None;
-    let mut jira_default_project: Option<String> = None;
-
-    match Confirm::new("Jira も設定しますか?")
-        .with_default(false)
-        .prompt()
-    {
-        Ok(true) => {
-            let url = match Text::new("Jira Base URL (e.g. https://jira.example.com):")
-                .with_validator(|s: &str| match url::Url::parse(s.trim()) {
-                    Ok(u)
-                        if matches!(u.scheme(), "http" | "https")
-                            && u.host_str().is_some()
-                            && u.username().is_empty()
-                            && u.password().is_none()
-                            && u.query().is_none()
-                            && u.fragment().is_none() =>
-                    {
+        let max_page_chars =
+            match CustomType::<usize>::new("Maximum page content length (characters):")
+                .with_default(existing.max_page_chars.unwrap_or(50_000))
+                .with_parser(&|value: &str| value.trim().parse::<usize>().map_err(|_| ()))
+                .with_error_message("正の整数を入力してください")
+                .with_validator(|&value: &usize| {
+                    if value >= 1_000 {
                         Ok(Validation::Valid)
-                    }
-                    Ok(_) => Ok(Validation::Invalid(
-                        "http:// または https://host/path 形式の URL を入力してください（認証情報・クエリ不可）"
-                            .into(),
-                    )),
-                    Err(_) => Ok(Validation::Invalid(
-                        "有効な URL を入力してください".into(),
-                    )),
-                })
-                .prompt()
-            {
-                Ok(v) => v.trim().to_string(),
-                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-                    println!("\nキャンセルされました");
-                    return Ok(());
-                }
-                Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
-            };
-
-            let path = match Text::new("Jira API path:")
-                .with_default("/rest/api/2")
-                .with_validator(|s: &str| {
-                    let t = s.trim();
-                    if t.is_empty() {
-                        Ok(Validation::Invalid("API パスを入力してください".into()))
-                    } else if !t.starts_with('/') {
-                        Ok(Validation::Invalid("API パスは / で始めてください".into()))
                     } else {
-                        Ok(Validation::Valid)
+                        Ok(Validation::Invalid(
+                            "1000 以上の値を入力してください".into(),
+                        ))
                     }
                 })
                 .prompt()
             {
-                Ok(v) => v.trim().to_string(),
+                Ok(value) => value,
                 Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                     println!("\nキャンセルされました");
                     return Ok(());
                 }
-                Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+                Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
             };
-
-            let allowed: Option<Vec<String>> =
-                match Text::new("Allowed projects (comma-separated — leave blank to allow all):")
-                    .prompt_skippable()
-                {
-                    Ok(Some(s)) => {
-                        let projects: Vec<String> = s
-                            .split(',')
-                            .map(|k| k.trim().to_string())
-                            .filter(|k| !k.is_empty())
-                            .collect();
-                        if projects.is_empty() {
-                            None
-                        } else {
-                            Some(projects)
-                        }
-                    }
-                    Ok(None) => None,
-                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-                        println!("\nキャンセルされました");
-                        return Ok(());
-                    }
-                    Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
-                };
-
-            let default_project: Option<String> =
-                match Text::new("Default project key (optional):").prompt_skippable() {
-                    Ok(Some(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
-                    Ok(_) => None,
-                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-                        println!("\nキャンセルされました");
-                        return Ok(());
-                    }
-                    Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
-                };
-
-            jira_base_url = Some(url);
-            jira_api_path = Some(path);
-            jira_allowed_projects = allowed;
-            jira_default_project = default_project;
-        }
-        Ok(false) => {}
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-            println!("\nキャンセルされました");
-            return Ok(());
-        }
-        Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
-    }
-
-    let jira_configured = jira_base_url.is_some();
-
-    let profile_config = ProfileConfig {
-        base_url: Some(base_url),
-        api_path: Some(api_path),
-        allowed_spaces,
-        default_space,
-        default_limit: Some(default_limit),
-        max_limit: Some(max_limit),
-        max_page_chars: Some(max_page_chars),
-        jira_base_url,
-        jira_api_path,
-        jira_allowed_projects,
-        jira_default_project,
+        Some((default_limit, max_limit, max_page_chars))
+    } else {
+        None
     };
 
-    let saved_path =
-        save_profile_to_path(profile_name, &profile_config, &config_path).map(|()| config_path)?;
-
-    println!();
-    println!("設定を {} に保存しました。", saved_path.display());
-
-    match Confirm::new("APIトークンをキーリングに保存しますか?")
-        .with_default(true)
-        .with_help_message("Noの場合は環境変数 CONFLUENCE_TOKEN で設定してください")
-        .prompt()
-    {
-        Ok(true) => {
-            let token = Password::new("API Token:")
-                .prompt()
-                .map_err(|e| ConfluenceError::ConfigError(e.to_string()))?;
-            if token.trim().is_empty() {
-                return Err(ConfluenceError::ConfigError(
-                    "Token must not be empty.".to_string(),
-                ));
-            }
-            store_token_in_keyring(profile_name, &token)?;
-            println!("トークンをキーリングに保存しました。");
-        }
-        Ok(false) => {
-            println!("(トークンは環境変数 CONFLUENCE_TOKEN で設定してください)");
-        }
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-            println!(
-                "\nキャンセルされました。(トークンは環境変数 CONFLUENCE_TOKEN で設定してください)"
-            );
-        }
-        Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+    let mut merged = existing;
+    if let Some((base_url, api_path, allowed_spaces, default_space)) = confluence_values {
+        merged.base_url = Some(base_url);
+        merged.api_path = Some(api_path);
+        merged.allowed_spaces = allowed_spaces;
+        merged.default_space = default_space;
+    }
+    if let Some((base_url, api_path, allowed_projects, default_project)) = jira_values {
+        merged.jira_base_url = Some(base_url);
+        merged.jira_api_path = Some(api_path);
+        merged.jira_allowed_projects = allowed_projects;
+        merged.jira_default_project = default_project;
+    }
+    if let Some((default_limit, max_limit, max_page_chars)) = common_values {
+        merged.default_limit = Some(default_limit);
+        merged.max_limit = Some(max_limit);
+        merged.max_page_chars = Some(max_page_chars);
     }
 
-    if jira_configured {
+    save_profile_to_path(profile_name, &merged, &config_path)?;
+    println!();
+    println!("設定を {} に保存しました。", config_path.display());
+
+    if configure_confluence {
+        match Confirm::new("APIトークンをキーリングに保存しますか?")
+            .with_default(true)
+            .with_help_message("Noの場合は環境変数 CONFLUENCE_TOKEN で設定してください")
+            .prompt()
+        {
+            Ok(true) => {
+                let token = match Password::new("API Token:").prompt() {
+                    Ok(token) => token,
+                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                        println!("\nキャンセルされました。(トークンは環境変数 CONFLUENCE_TOKEN で設定してください)");
+                        return Ok(());
+                    }
+                    Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+                };
+                if token.trim().is_empty() {
+                    return Err(ConfluenceError::ConfigError(
+                        "Token must not be empty.".to_string(),
+                    ));
+                }
+                store_token_in_keyring(profile_name, &token)?;
+                println!("トークンをキーリングに保存しました。");
+            }
+            Ok(false) => println!("(トークンは環境変数 CONFLUENCE_TOKEN で設定してください)"),
+            Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                println!("\nキャンセルされました。(トークンは環境変数 CONFLUENCE_TOKEN で設定してください)");
+            }
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+        }
+    }
+    if configure_jira {
         match Confirm::new("Jira APIトークンをキーリングに保存しますか?")
             .with_default(true)
             .with_help_message("Noの場合は環境変数 JIRA_TOKEN で設定してください")
             .prompt()
         {
             Ok(true) => {
-                let token = Password::new("Jira API Token:")
-                    .prompt()
-                    .map_err(|e| ConfluenceError::ConfigError(e.to_string()))?;
+                let token = match Password::new("Jira API Token:").prompt() {
+                    Ok(token) => token,
+                    Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
+                        println!("\nキャンセルされました。(トークンは環境変数 JIRA_TOKEN で設定してください)");
+                        return Ok(());
+                    }
+                    Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
+                };
                 if token.trim().is_empty() {
                     return Err(ConfluenceError::ConfigError(
                         "Token must not be empty.".to_string(),
@@ -1096,15 +1273,13 @@ fn run_config_init(profile: String, force: bool) -> Result<(), ConfluenceError> 
                 store_jira_token_in_keyring(profile_name, &token)?;
                 println!("Jira トークンをキーリングに保存しました。");
             }
-            Ok(false) => {
-                println!("(トークンは環境変数 JIRA_TOKEN で設定してください)");
-            }
+            Ok(false) => println!("(トークンは環境変数 JIRA_TOKEN で設定してください)"),
             Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                 println!(
                     "\nキャンセルされました。(トークンは環境変数 JIRA_TOKEN で設定してください)"
                 );
             }
-            Err(e) => return Err(ConfluenceError::ConfigError(e.to_string())),
+            Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
         }
     }
 
@@ -1140,4 +1315,84 @@ fn run_skill(args: cli::SkillArgs) -> Result<(), ConfluenceError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_search_sources_defaults_to_both_backends_for_a_query() {
+        assert_eq!(
+            plan_search_sources(None, true, false, false).unwrap(),
+            SearchPlan {
+                confluence: true,
+                jira: true,
+            }
+        );
+    }
+
+    #[test]
+    fn plan_search_sources_rejects_a_search_without_query_or_jira_filters() {
+        assert!(matches!(
+            plan_search_sources(None, false, false, false),
+            Err(ConfluenceError::NoSearchCriteria)
+        ));
+    }
+
+    #[test]
+    fn plan_search_sources_routes_filter_only_searches_to_jira() {
+        assert_eq!(
+            plan_search_sources(None, false, false, true).unwrap(),
+            SearchPlan {
+                confluence: false,
+                jira: true,
+            }
+        );
+    }
+
+    #[test]
+    fn plan_search_sources_requires_a_query_when_all_is_explicit_for_jira_filters() {
+        assert!(matches!(
+            plan_search_sources(Some(SearchSource::All), false, false, true),
+            Err(ConfluenceError::QueryRequiredForConfluence)
+        ));
+    }
+
+    #[test]
+    fn plan_search_sources_requires_a_query_when_confluence_flags_are_present() {
+        assert!(matches!(
+            plan_search_sources(None, false, true, true),
+            Err(ConfluenceError::QueryRequiredForConfluence)
+        ));
+    }
+
+    #[test]
+    fn plan_search_sources_rejects_confluence_flags_when_jira_is_explicit() {
+        assert!(matches!(
+            plan_search_sources(Some(SearchSource::Jira), true, true, false),
+            Err(ConfluenceError::InvalidArguments(message))
+                if message == "--space/--in apply to Confluence but --source jira excludes it"
+        ));
+    }
+
+    #[test]
+    fn plan_search_sources_rejects_jira_flags_when_confluence_is_explicit() {
+        assert!(matches!(
+            plan_search_sources(Some(SearchSource::Confluence), true, false, true),
+            Err(ConfluenceError::InvalidArguments(message))
+                if message == "--project/--status/--assignee/--reporter/--type/--label apply to Jira but --source confluence excludes it"
+        ));
+    }
+
+    #[test]
+    fn plan_search_sources_honors_explicit_jira_for_a_query() {
+        assert_eq!(
+            plan_search_sources(Some(SearchSource::Jira), true, false, false).unwrap(),
+            SearchPlan {
+                confluence: false,
+                jira: true,
+            }
+        );
+    }
 }

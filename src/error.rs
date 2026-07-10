@@ -72,6 +72,12 @@ pub enum ConfluenceError {
 
     #[error("specify a search query or at least one filter (--status/--assignee/--reporter/--type/--label)")]
     NoSearchCriteria,
+
+    #[error("{0}")]
+    InvalidArguments(String),
+
+    #[error("a search query is required to search Confluence; add a query or use --source jira")]
+    QueryRequiredForConfluence,
 }
 
 impl ConfluenceError {
@@ -101,6 +107,8 @@ impl ConfluenceError {
             ConfluenceError::NoProjectSpecified => "no_project_specified",
             ConfluenceError::InvalidIssueKey(_) => "invalid_issue_key",
             ConfluenceError::NoSearchCriteria => "no_search_criteria",
+            ConfluenceError::InvalidArguments(_) => "invalid_arguments",
+            ConfluenceError::QueryRequiredForConfluence => "query_required",
         }
     }
 }

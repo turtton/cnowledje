@@ -82,6 +82,14 @@ pub struct SearchOutput {
     pub results: Vec<SearchResultOutput>,
 }
 
+/// Combined output of the unified `search` command.
+#[derive(Debug, Serialize)]
+pub struct UnifiedSearchOutput {
+    pub query: Option<String>,
+    pub confluence: Option<SearchOutput>,
+    pub jira: Option<JiraSearchOutput>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SearchResultOutput {
     pub id: String,

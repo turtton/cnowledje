@@ -611,7 +611,9 @@ fn make_issue_url_strips_trailing_slash() {
     assert_eq!(url, "https://jira.example.com/browse/PROJ-123");
 }
 
-use cnowledje::config::{profile_exists_at_path, save_profile_to_path, ProfileConfig};
+use cnowledje::config::{
+    load_profile_config_at_path, profile_exists_at_path, save_profile_to_path, ProfileConfig,
+};
 
 #[test]
 fn config_save_creates_new_file_with_profile() {
@@ -774,6 +776,101 @@ fn config_save_omits_none_jira_fields() {
     assert!(
         !content.contains("jira_"),
         "no jira_* keys should appear when all jira fields are None"
+    );
+}
+
+#[test]
+fn unified_search_output_keeps_null_jira_and_nested_confluence_shape() {
+    let confluence = models::SearchOutput {
+        query: "release readiness".into(),
+        spaces: vec!["ENG".into()],
+        search_in: "both".into(),
+        results: vec![models::SearchResultOutput {
+            id: "123".into(),
+            title: "Release readiness".into(),
+            space_key: "ENG".into(),
+            space_name: "Engineering".into(),
+            url: "https://confluence.example.com/pages/123".into(),
+            last_modified: Some("2026-07-10T00:00:00Z".into()),
+            matched_by: vec!["title".into()],
+            excerpt: Some("Ready for release".into()),
+        }],
+    };
+    let expected_confluence = serde_json::to_value(&confluence).unwrap();
+    let unified = models::UnifiedSearchOutput {
+        query: Some("release readiness".into()),
+        confluence: Some(confluence),
+        jira: None,
+    };
+
+    let json = serde_json::to_value(unified).unwrap();
+
+    assert_eq!(json.get("jira"), Some(&serde_json::Value::Null));
+    assert_eq!(json.get("confluence"), Some(&expected_confluence));
+}
+
+#[test]
+fn raw_profile_round_trip_preserves_confluence_when_jira_is_added() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let confluence_profile = ProfileConfig {
+        base_url: Some("https://confluence.example.com".into()),
+        api_path: Some("/wiki/rest/api".into()),
+        allowed_spaces: Some(vec!["ENG".into(), "OPS".into()]),
+        default_space: Some("ENG".into()),
+        ..Default::default()
+    };
+    save_profile_to_path("team", &confluence_profile, &path).unwrap();
+
+    let mut merged = load_profile_config_at_path("team", &path).unwrap();
+    merged.jira_base_url = Some("https://jira.example.com".into());
+    merged.jira_api_path = Some("/rest/api/2".into());
+    merged.jira_allowed_projects = Some(vec!["ENG".into(), "OPS".into()]);
+    merged.jira_default_project = Some("ENG".into());
+    save_profile_to_path("team", &merged, &path).unwrap();
+
+    let reread = load_profile_config_at_path("team", &path).unwrap();
+    assert_eq!(reread.base_url, confluence_profile.base_url);
+    assert_eq!(reread.api_path, confluence_profile.api_path);
+    assert_eq!(reread.allowed_spaces, confluence_profile.allowed_spaces);
+    assert_eq!(reread.default_space, confluence_profile.default_space);
+    assert_eq!(
+        reread.jira_base_url.as_deref(),
+        Some("https://jira.example.com")
+    );
+    assert_eq!(reread.jira_api_path.as_deref(), Some("/rest/api/2"));
+    assert_eq!(
+        reread.jira_allowed_projects,
+        Some(vec!["ENG".into(), "OPS".into()])
+    );
+    assert_eq!(reread.jira_default_project.as_deref(), Some("ENG"));
+}
+
+#[test]
+fn raw_profile_loader_returns_empty_profile_for_missing_path_or_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_path = dir.path().join("missing.toml");
+
+    let missing_file = load_profile_config_at_path("team", &missing_path).unwrap();
+    assert_eq!(
+        serde_json::to_value(missing_file).unwrap(),
+        serde_json::to_value(ProfileConfig::default()).unwrap()
+    );
+
+    let path = dir.path().join("config.toml");
+    save_profile_to_path(
+        "other-team",
+        &ProfileConfig {
+            base_url: Some("https://confluence.example.com".into()),
+            ..Default::default()
+        },
+        &path,
+    )
+    .unwrap();
+    let missing_profile = load_profile_config_at_path("team", &path).unwrap();
+    assert_eq!(
+        serde_json::to_value(missing_profile).unwrap(),
+        serde_json::to_value(ProfileConfig::default()).unwrap()
     );
 }
 

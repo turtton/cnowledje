@@ -1,6 +1,7 @@
 use crate::error::ConfluenceError;
 use crate::models::{
     ErrorDetail, ErrorOutput, JiraIssueOutput, JiraSearchOutput, PageOutput, SearchOutput,
+    UnifiedSearchOutput,
 };
 
 // ── Search output ─────────────────────────────────────────────────────────────
@@ -45,6 +46,33 @@ pub fn print_search_human(output: &SearchOutput) {
             println!("     Excerpt: {}", truncated);
         }
         println!();
+    }
+}
+
+/// Print combined search results as pretty JSON.
+pub fn print_unified_search_json(output: &UnifiedSearchOutput) -> Result<(), ConfluenceError> {
+    println!("{}", serde_json::to_string_pretty(output)?);
+    Ok(())
+}
+
+/// Print combined search results in human-readable form.
+pub fn print_unified_search_human(output: &UnifiedSearchOutput) {
+    let confluence_needs_separator = output
+        .confluence
+        .as_ref()
+        .is_some_and(|confluence| confluence.results.is_empty());
+
+    if let Some(confluence) = &output.confluence {
+        println!("=== Confluence ===");
+        print_search_human(confluence);
+    }
+
+    if let Some(jira) = &output.jira {
+        if confluence_needs_separator {
+            println!();
+        }
+        println!("=== Jira ===");
+        print_jira_search_human(jira);
     }
 }
 

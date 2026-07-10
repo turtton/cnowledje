@@ -10,6 +10,14 @@ pub enum SearchIn {
     Text,
 }
 
+/// Which backend(s) to search.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchSource {
+    All,
+    Confluence,
+    Jira,
+}
+
 impl std::fmt::Display for SearchIn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

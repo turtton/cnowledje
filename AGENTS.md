@@ -30,9 +30,9 @@ No CI exists yet. Run `cargo fmt && cargo clippy && cargo test` before committin
 | `src/cql.rs` | CQL generation + page ID extraction |
 | `src/jql.rs` | JQL generation + issue key extraction (Jira analogue of `cql.rs`) |
 | `src/markdown.rs` | Confluence storage HTML → Markdown converter; also renders Jira issue description/comments (`render_issue_content`) |
-| `src/models.rs` | Confluence + Jira API response types, CLI output types, `NOTICE`/`JIRA_NOTICE` constants |
+| `src/models.rs` | Confluence + Jira API response types, `UnifiedSearchOutput` and other CLI output types, `NOTICE`/`JIRA_NOTICE` constants |
 | `src/skill.rs` | Bundled `SKILL.md` files (`BUNDLED_SKILLS`, `include_str!`) + `install_skill` (writes to `~/.agents/skills`) |
-| `src/types.rs` | `SearchIn`, `PageFormat`, `IssueFormat` enums |
+| `src/types.rs` | `SearchIn`, `SearchSource`, `PageFormat`, `IssueFormat` enums |
 | `src/error.rs` | `ConfluenceError` enum |
 | `src/format.rs` | Output formatting helpers |
 | `tests/integration_tests.rs` | Integration tests — use lib crate, no live HTTP |
@@ -72,6 +72,8 @@ Never write either token in the config file.
 Token keyring commands: `cnowledje config token set [--profile <name>] [--jira]` / `cnowledje config token delete [--profile <name>] [--jira]` (`--jira` targets the `cnowledje-jira` keyring service instead of `cnowledje`).
 
 `cnowledje config check` validates Confluence and Jira **independently** — a backend with no `base_url` configured prints `(not configured)` and is skipped; a backend that resolves `base_url` **and** a token gets its fields printed plus a live connectivity check (Confluence: `content/search`; Jira: `/myself`); a backend with `base_url` set but no resolvable token (or any other config error) prints `configuration error: ...` and is recorded as a failure without a connectivity check. If *both* backends are entirely unconfigured, it errors with `MissingBaseUrl` (legacy single-backend behavior preserved). Otherwise, the first failure encountered across either backend is returned as the command's error.
+`cnowledje config init [--profile <name>] [--confluence] [--jira]` updates configuration interactively without replacing an entire profile. `--confluence` and `--jira` select only those sections and skip the section-selection prompts; without either flag, each section is offered interactively (configured sections default to No). Selected fields are prefilled from the profile and merged back, while unselected backend fields remain unchanged. Existing profiles also keep shared limits unless their separate confirmation is accepted. `config init` has no `--force` option.
+
 
 `cnowledje skill install [--force]` writes every entry in `skill::BUNDLED_SKILLS` (currently `confluence-lookup` and `jira-lookup`) to `~/.agents/skills/<name>/SKILL.md`. Use `--force` when upgrading the binary to overwrite an older installed version; the command aborts on the first skill whose destination differs and `--force` wasn't passed (already-installed skills before it are not rolled back).
 
@@ -96,11 +98,13 @@ Token keyring commands: `cnowledje config token set [--profile <name>] [--jira]`
 - **Space allowlist** — if `allowed_spaces` is set, passing an unlisted space to `search` is a hard error. `page <id>` does **not** check `allowed_spaces`; access is controlled solely by the token's Confluence permissions.
 - **Page URL formats** — `page` accepts a numeric ID or a URL containing `?pageId=<id>` or `/pages/<id>`. Pretty URLs like `/display/SPACE/Title` are **not** supported and return an error.
 - **JQL is generated internally** (`src/jql.rs`) — raw JQL input from users/agents is intentionally not supported. `build_search_jql` AND-joins clauses in a fixed order (project → text → status → assignee → reporter → issuetype → labels) with a trailing ` ORDER BY updated DESC`; repeatable filters (`--status`/`--type`/`--label`) render as `field in (...)` (OR semantics) when more than one value is given.
-- **`jira search` runs a single JQL query** — no dedup/multi-query merge like Confluence's `both` mode.
-- **`jira issue` rendering** — `expand=renderedFields` HTML is converted via the existing `html_to_markdown` (which handles Confluence `ac:` macros too, but Jira's rendered HTML simply doesn't contain them; `language` is always `None` since `sv-translation` is Confluence-only); when rendered HTML is absent/empty, raw Jira wiki markup is truncated as plain text instead. Description and comments share one character budget (`min(--max-chars, JiraConfig::max_issue_chars)`, where `max_issue_chars` is sourced from the shared TOML `max_page_chars` setting); comments dropped once the budget is exhausted are reported via `omitted_comments` in the output rather than silently disappearing.
+- **Unified search routing** — `search` targets both backends when `--source` is omitted or is `all`; `--source confluence` and `--source jira` target only the named backend. `--space`/`--in` are Confluence-only; `--project`/`--status`/`--assignee`/`--reporter`/`--type`/`--label` are Jira-only, and using a backend's flags while `--source` excludes it is an argument error. A query-less search requires a Jira filter; it automatically becomes Jira-only only when `--source` and Confluence flags are both absent.
+- **Search configuration and execution** — a backend selected explicitly by `--source` (including `--source all`) or one with its own flags is pinned, so its configuration errors fail the command. An unpinned backend may be skipped with a stderr warning only for a missing base URL or missing default space/project; other errors fail, and if both are skipped the first skip error is returned. When both legs run, they use `tokio::try_join!`, so either failure fails the command. Human output always labels each executed backend; JSON serializes `UnifiedSearchOutput` as `{ "query": string | null, "confluence": SearchOutput | null, "jira": JiraSearchOutput | null }`, retaining both backend keys even when one is `null`.
+- **`search --source jira` runs a single JQL query** — no dedup/multi-query merge like Confluence's `both` mode.
+- **`issue` rendering** — `expand=renderedFields` HTML is converted via the existing `html_to_markdown` (which handles Confluence `ac:` macros too, but Jira's rendered HTML simply doesn't contain them; `language` is always `None` since `sv-translation` is Confluence-only); when rendered HTML is absent/empty, raw Jira wiki markup is truncated as plain text instead. Description and comments share one character budget (`min(--max-chars, JiraConfig::max_issue_chars)`, where `max_issue_chars` is sourced from the shared TOML `max_page_chars` setting); comments dropped once the budget is exhausted are reported via `omitted_comments` in the output rather than silently disappearing.
 - **Jira issue key extraction** (`jql::extract_issue_key`) accepts a bare key (`PROJ-123`, case-normalized to uppercase) or a URL containing `/browse/<KEY>`; other URL shapes (e.g. Cloud's `?selectedIssue=`) are unsupported and return `InvalidIssueKey`.
 - **Jira keyring** uses a separate service name `cnowledje-jira` (vs. Confluence's `cnowledje`) so both tokens can coexist per profile; `config::keyring_entry` is the shared private helper behind both.
-- **Jira project allowlist** — `jira search` enforces `jira_allowed_projects` via `validate_projects` (same shape as Confluence's `allowed_spaces`). `jira issue <key>` does **not** check it — same policy as `page <id>`; access is controlled solely by the token's Jira permissions.
+- **Jira project allowlist** — `search --source jira` enforces `jira_allowed_projects` via `validate_projects` (same shape as Confluence's `allowed_spaces`). `issue <key>` does **not** check it — same policy as `page <id>`; access is controlled solely by the token's Jira permissions.
 
 ## Testing
 
@@ -110,9 +114,10 @@ Unit tests live inside each module (`#[cfg(test)]`). Integration tests are in `t
 - Markdown conversion (headings, lists, tables, code blocks, macros, Japanese UTF-8, truncation, sv-translation language selection)
 - Jira issue rendering (`render_issue_content`: HTML/raw fallback, char-budget exhaustion + `omitted_comments`, empty description/comments)
 - JQL generation (project/status/issuetype/label single vs. `in (...)`, clause order + trailing sort, filters-only queries) and issue key extraction (bare key, `/browse/<KEY>` URL, invalid input)
-- Format helpers (`make_page_url`, `make_issue_url`)
-- Config round-trips including `jira_*` `ProfileConfig` fields
+- Format helpers (`make_page_url`, `make_issue_url`) and `UnifiedSearchOutput` JSON serialization, including stable `null` backend keys
+- Config round-trips including `jira_*` `ProfileConfig` fields and `load_profile_config_at_path` merge preservation
 - Bundled skill set (`skill::BUNDLED_SKILLS` contains exactly `confluence-lookup` and `jira-lookup`)
+- Unified search source planning (routing, query-less filter searches, and conflicting backend flags) and clap parsing for flattened `issue`, `search --source`, and `config init` section flags
 
 No live HTTP tests exist. Mock server tests are a planned future addition.
 

@@ -38,7 +38,9 @@ cnowledje config --help   # 設定・トークン管理
 
 ## ワークフロー
 
-1. **検索**: ユーザーの質問からキーワードを抽出し `cnowledje search` で候補ページを探す。
+`cnowledje search` は Jira も検索対象にできる統合コマンドである。このスキルで Confluence のみに絞るときは、必ず `--source confluence` を付ける。
+
+1. **検索**: ユーザーの質問からキーワードを抽出し `cnowledje search "<query>" --source confluence --space <KEY>` で候補ページを探す。
 2. **取得**: 候補から最も関連性の高いページを選び `cnowledje page <ID>` で内容を取得する。
 3. **回答**: 取得した内容をもとに、下記の振る舞い指針に従って回答する。
 
@@ -46,6 +48,7 @@ cnowledje config --help   # 設定・トークン管理
 
 ### 検索結果の絞り込み
 
+- Confluence 専用の検索では `--source confluence` を付け、必要に応じて `--space <KEY>` と `--in title|text|both` を指定する。`--source` を省略すると、設定済みの Jira も検索対象になる。
 - `matched_by` に `"title"` を含む結果を優先する。
 - `excerpt` の内容からユーザーの質問に最も関連性の高いページを選ぶ。
 - 判断が難しい場合は上位 2〜3 件を取得して比較する。
