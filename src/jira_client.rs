@@ -3,7 +3,7 @@ use url::Url;
 
 use crate::client::{build_http_client, handle_response};
 use crate::error::ConfluenceError;
-use crate::models::{JiraIssueResponse, JiraSearchResponse};
+use crate::models::{JiraIssueResponse, JiraRemoteLink, JiraSearchResponse};
 
 pub struct JiraClient {
     client: Client,
@@ -66,6 +66,17 @@ impl JiraClient {
             .query(&[("expand", "renderedFields")])
             .send()
             .await?;
+
+        handle_response(response, ConfluenceError::JiraUnauthorized).await
+    }
+
+    /// Retrieve all remote links associated with a Jira issue.
+    pub async fn get_remote_links(
+        &self,
+        key: &str,
+    ) -> Result<Vec<JiraRemoteLink>, ConfluenceError> {
+        let url = self.api_url(&format!("/issue/{}/remotelink", key))?;
+        let response = self.client.get(url).send().await?;
 
         handle_response(response, ConfluenceError::JiraUnauthorized).await
     }

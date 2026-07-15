@@ -1152,3 +1152,95 @@ fn confluence_metadata_defaults_when_response_omits_metadata() {
     let page: models::PageResponse = serde_json::from_value(page_json).unwrap();
     assert!(page.metadata.label_names().is_empty());
 }
+#[test]
+fn jira_remote_link_fixture_decodes_all_reference_fields() {
+    let link: models::JiraRemoteLink = serde_json::from_value(serde_json::json!({
+        "id": 42,
+        "globalId": "system=confluence&object=page-123",
+        "application": {
+            "type": "com.atlassian.confluence",
+            "name": "Confluence"
+        },
+        "relationship": "Wiki Page",
+        "object": {
+            "url": "https://confluence.example.com/wiki/spaces/ENG/pages/123",
+            "title": "Release readiness",
+            "summary": "Deployment checklist"
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(link.id, 42);
+    assert_eq!(
+        link.global_id.as_deref(),
+        Some("system=confluence&object=page-123")
+    );
+    let application = link.application.as_ref().unwrap();
+    assert_eq!(
+        application.application_type.as_deref(),
+        Some("com.atlassian.confluence")
+    );
+    assert_eq!(application.name.as_deref(), Some("Confluence"));
+    let object = link.object.as_ref().unwrap();
+    assert_eq!(
+        object.url,
+        "https://confluence.example.com/wiki/spaces/ENG/pages/123"
+    );
+    assert_eq!(object.title, "Release readiness");
+    assert_eq!(object.summary.as_deref(), Some("Deployment checklist"));
+}
+
+#[test]
+fn jira_issue_output_serializes_confluence_references_with_expected_shape() {
+    let output = models::JiraIssueOutput {
+        key: "ENG-42".into(),
+        summary: "Release readiness".into(),
+        project_key: Some("ENG".into()),
+        status: Some("Open".into()),
+        issue_type: Some("Task".into()),
+        priority: None,
+        assignee: None,
+        reporter: None,
+        labels: vec![],
+        created: None,
+        updated: None,
+        url: "https://jira.example.com/browse/ENG-42".into(),
+        description_markdown: "Ready".into(),
+        comments: vec![],
+        omitted_comments: 0,
+        confluence_references: vec![
+            models::ConfluenceReferenceOutput {
+                id: 123,
+                title: "Release readiness".into(),
+                url: "https://confluence.example.com/wiki/spaces/ENG/pages/123".into(),
+                summary: Some("Deployment checklist".into()),
+            },
+            models::ConfluenceReferenceOutput {
+                id: 124,
+                title: "Runbook".into(),
+                url: "https://confluence.example.com/wiki/spaces/ENG/pages/124".into(),
+                summary: None,
+            },
+        ],
+        notice: models::JIRA_NOTICE,
+    };
+
+    let json = serde_json::to_value(output).unwrap();
+    assert_eq!(
+        json["confluence_references"],
+        serde_json::json!([
+            {
+                "id": 123,
+                "title": "Release readiness",
+                "url": "https://confluence.example.com/wiki/spaces/ENG/pages/123",
+                "summary": "Deployment checklist"
+            },
+            {
+                "id": 124,
+                "title": "Runbook",
+                "url": "https://confluence.example.com/wiki/spaces/ENG/pages/124",
+                "summary": null
+            }
+        ])
+    );
+}

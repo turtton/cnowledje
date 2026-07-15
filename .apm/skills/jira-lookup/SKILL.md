@@ -43,6 +43,9 @@ cnowledje config --help          # 設定・トークン管理
    `--assignee` / `--reporter` / `--type` / `--label` で絞り込む。
 2. **取得**: 候補から最も関連性の高い issue を選び `cnowledje issue <KEY>`
    でコメント込みの詳細を取得する。
+   Jiraが公開するConfluenceのremote linkも取得し、Markdown/JSON出力の
+   `Confluence references` / `confluence_references` にページ名とURLを含める。
+   リンクが公開されていない場合や、`--format plain` では本文・コメントのみを扱う。
 3. **回答**: 取得した内容をもとに、下記の振る舞い指針に従って回答する。
 
 詳細なオプションや検索・取得のパターンは `--help` を参照すること。

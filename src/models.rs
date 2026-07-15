@@ -229,6 +229,29 @@ pub struct JiraRenderedFields {
     pub description: Option<String>,           // HTML
     pub comment: Option<JiraCommentContainer>, // body is HTML
 }
+#[derive(Debug, Deserialize)]
+pub struct JiraRemoteLink {
+    pub id: u64,
+    pub object: Option<JiraRemoteLinkObject>,
+    #[serde(rename = "globalId")]
+    pub global_id: Option<String>,
+    pub application: Option<JiraRemoteLinkApplication>,
+    pub relationship: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JiraRemoteLinkObject {
+    pub url: String,
+    pub title: String,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JiraRemoteLinkApplication {
+    #[serde(rename = "type")]
+    pub application_type: Option<String>,
+    pub name: Option<String>,
+}
 
 // ── Jira CLI output types ─────────────────────────────────────────────────────
 
@@ -278,7 +301,16 @@ pub struct JiraIssueOutput {
     pub description_markdown: String,
     pub comments: Vec<JiraCommentOutput>,
     pub omitted_comments: u32, // comments dropped from output by the char budget
+    pub confluence_references: Vec<ConfluenceReferenceOutput>,
     pub notice: &'static str,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ConfluenceReferenceOutput {
+    pub id: u64,
+    pub title: String,
+    pub url: String,
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]

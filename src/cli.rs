@@ -245,6 +245,8 @@ NOTES:
     capped by the configured max_page_chars (the smaller value wins).
     Comments dropped once the budget runs out are reported via the
     omitted_comments count.
+  * Markdown and JSON output include Confluence pages linked to the issue
+    through Jira remote links when Jira exposes them.
   * Only /browse/<KEY> issue URLs are supported.";
 
 #[derive(Args)]

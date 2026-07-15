@@ -270,6 +270,26 @@ pub fn print_jira_issue_markdown(output: &JiraIssueOutput) {
     if !output.labels.is_empty() {
         println!("- Labels: {}", output.labels.join(", "));
     }
+
+    if !output.confluence_references.is_empty() {
+        println!();
+        println!(
+            "## Confluence references ({})",
+            output.confluence_references.len()
+        );
+        for reference in &output.confluence_references {
+            match reference
+                .summary
+                .as_deref()
+                .filter(|summary| !summary.is_empty())
+            {
+                Some(summary) => {
+                    println!("- [{}]({}) — {}", reference.title, reference.url, summary)
+                }
+                None => println!("- [{}]({})", reference.title, reference.url),
+            }
+        }
+    }
     println!();
     println!("## Description");
     println!();

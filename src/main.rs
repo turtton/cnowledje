@@ -26,11 +26,13 @@ use cnowledje::jql::{build_search_jql, extract_issue_key, JqlFilters};
 use cnowledje::markdown;
 use cnowledje::models::SearchResult;
 use cnowledje::models::{
-    JiraIssueOutput, JiraIssueResponse, JiraSearchOutput, JiraSearchResultOutput, PageOutput,
-    SearchOutput, SearchResultOutput, UnifiedSearchOutput, JIRA_NOTICE, NOTICE,
+    ConfluenceReferenceOutput, JiraIssueOutput, JiraIssueResponse, JiraRemoteLink,
+    JiraSearchOutput, JiraSearchResultOutput, PageOutput, SearchOutput, SearchResultOutput,
+    UnifiedSearchOutput, JIRA_NOTICE, NOTICE,
 };
 use cnowledje::skill;
 use cnowledje::types::{IssueFormat, PageFormat, SearchIn, SearchSource};
+use url::Url;
 
 #[tokio::main]
 async fn main() {
@@ -624,14 +626,162 @@ async fn search_jira(
     })
 }
 
+fn configured_confluence_base_url(profile: Option<&str>) -> Option<String> {
+    if let Ok(url) = std::env::var("CONFLUENCE_BASE_URL") {
+        if !url.trim().is_empty() {
+            return Some(url);
+        }
+    }
+
+    load_profile_config(profile.unwrap_or("default"))
+        .ok()
+        .and_then(|profile| profile.base_url)
+}
+
+fn normalize_remote_link_url(base_url: Option<&str>, raw_url: &str) -> Option<String> {
+    let parsed = match Url::parse(raw_url) {
+        Ok(url) => url,
+        Err(_) => {
+            if raw_url.starts_with("//") {
+                return None;
+            }
+            let mut base = Url::parse(base_url?).ok()?;
+            if !base.path().ends_with('/') {
+                let mut path = base.path().to_string();
+                path.push('/');
+                base.set_path(&path);
+            }
+            base.join(raw_url).ok()?
+        }
+    };
+
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+
+    Some(parsed.to_string())
+}
+
+fn looks_like_confluence_page_url(url: &Url) -> bool {
+    let has_page_path = url
+        .path_segments()
+        .map(|mut segments| {
+            segments.any(|segment| {
+                segment.eq_ignore_ascii_case("pages") || segment.eq_ignore_ascii_case("display")
+            })
+        })
+        .unwrap_or(false);
+    let has_page_id = url
+        .query_pairs()
+        .any(|(key, value)| key == "pageId" && !value.trim().is_empty());
+
+    has_page_path || has_page_id
+}
+fn remote_link_matches_base_url(base_url: &str, link_url: &str) -> bool {
+    let Ok(base) = Url::parse(base_url) else {
+        return false;
+    };
+    let Some(link_url) = normalize_remote_link_url(Some(base_url), link_url) else {
+        return false;
+    };
+    let Ok(link) = Url::parse(&link_url) else {
+        return false;
+    };
+
+    if base.scheme() != link.scheme()
+        || base.host_str().map(str::to_ascii_lowercase)
+            != link.host_str().map(str::to_ascii_lowercase)
+        || base.port_or_known_default() != link.port_or_known_default()
+    {
+        return false;
+    }
+
+    let base_path = base.path().trim_end_matches('/');
+    if base_path.is_empty() || base_path == "/" {
+        return looks_like_confluence_page_url(&link);
+    }
+
+    link.path() == base_path || link.path().starts_with(&format!("{base_path}/"))
+}
+
+fn is_confluence_remote_link(
+    link: &JiraRemoteLink,
+    base_url: Option<&str>,
+    normalized_url: &str,
+) -> bool {
+    let app_identifies_confluence = link.application.as_ref().is_some_and(|application| {
+        match application.application_type.as_deref() {
+            Some(application_type) => {
+                application_type.eq_ignore_ascii_case("com.atlassian.confluence")
+            }
+            None => application.name.as_deref().is_some_and(|name| {
+                name.eq_ignore_ascii_case("confluence")
+                    || name.eq_ignore_ascii_case("system confluence")
+            }),
+        }
+    });
+
+    app_identifies_confluence
+        || base_url.is_some_and(|base| remote_link_matches_base_url(base, normalized_url))
+}
+
+fn map_confluence_references(
+    links: Vec<JiraRemoteLink>,
+    base_url: Option<&str>,
+) -> Vec<ConfluenceReferenceOutput> {
+    let mut seen_urls = HashSet::new();
+    links
+        .into_iter()
+        .filter_map(|link| {
+            let object = link.object.as_ref()?;
+            let normalized_url = normalize_remote_link_url(base_url, &object.url)?;
+            if !is_confluence_remote_link(&link, base_url, &normalized_url) {
+                return None;
+            }
+            if !seen_urls.insert(normalized_url.clone()) {
+                return None;
+            }
+            Some(ConfluenceReferenceOutput {
+                id: link.id,
+                title: object.title.clone(),
+                url: normalized_url,
+                summary: object.summary.clone(),
+            })
+        })
+        .collect()
+}
+
 // ── issue command ───────────────────────────────────────────────────────────
 
 async fn run_issue(args: cli::IssueArgs) -> Result<(), ConfluenceError> {
     let config = load_jira_config(args.profile.as_deref())?;
     let key = extract_issue_key(&args.issue_key_or_url)?;
+    let output_format = args.effective_format();
 
     let client = JiraClient::new(&config.base_url, &config.api_path, &config.token)?;
     let issue = client.get_issue(&key).await?;
+
+    let confluence_references = if output_format == IssueFormat::Plain {
+        Vec::new()
+    } else {
+        let confluence_base_url = configured_confluence_base_url(args.profile.as_deref());
+        match client.get_remote_links(&key).await {
+            Ok(remote_links) => {
+                map_confluence_references(remote_links, confluence_base_url.as_deref())
+            }
+            Err(error) => {
+                eprintln!(
+                    "warning: could not retrieve Confluence references ({})",
+                    error.kind()
+                );
+                Vec::new()
+            }
+        }
+    };
 
     let f = &issue.fields;
 
@@ -704,10 +854,11 @@ async fn run_issue(args: cli::IssueArgs) -> Result<(), ConfluenceError> {
         description_markdown: rendered.description_markdown,
         comments: rendered.comments,
         omitted_comments: rendered.omitted_comments,
+        confluence_references,
         notice: JIRA_NOTICE,
     };
 
-    match args.effective_format() {
+    match output_format {
         IssueFormat::Json => print_jira_issue_json(&output)?,
         IssueFormat::Markdown => print_jira_issue_markdown(&output),
         IssueFormat::Plain => print_jira_issue_plain(&output),
@@ -1578,5 +1729,313 @@ mod tests {
         let second = serde_json::to_value(&mapped[1]).unwrap();
         assert_eq!(second["labels"], serde_json::json!([]));
         assert_eq!(second["project_name"], serde_json::Value::Null);
+    }
+    #[test]
+    fn confluence_reference_mapping_identifies_filters_and_deduplicates_links() {
+        let link = |id: u64,
+                    url: &str,
+                    title: &str,
+                    application_type: Option<&str>,
+                    name: Option<&str>| JiraRemoteLink {
+            id,
+            global_id: None,
+            application: Some(cnowledje::models::JiraRemoteLinkApplication {
+                application_type: application_type.map(str::to_string),
+                name: name.map(str::to_string),
+            }),
+            relationship: None,
+            object: Some(cnowledje::models::JiraRemoteLinkObject {
+                url: url.to_string(),
+                title: title.to_string(),
+                summary: None,
+            }),
+        };
+
+        let references = map_confluence_references(
+            vec![
+                link(
+                    1,
+                    "https://other.example.com/page",
+                    "Identified by application type",
+                    Some("com.atlassian.confluence"),
+                    None,
+                ),
+                link(
+                    2,
+                    "https://confluence.example.com/wiki/page",
+                    "Matched configured base URL",
+                    Some("com.atlassian.jira"),
+                    Some("Jira"),
+                ),
+                link(
+                    3,
+                    "https://confluence.example.com/wiki/page",
+                    "Duplicate URL must be ignored",
+                    Some("com.atlassian.confluence"),
+                    None,
+                ),
+                link(
+                    4,
+                    "https://unrelated.example.com/wiki/page",
+                    "Non-Confluence link must be ignored",
+                    Some("com.atlassian.jira"),
+                    Some("Jira"),
+                ),
+            ],
+            Some("https://confluence.example.com/wiki"),
+        );
+
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| reference.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(references[0].title, "Identified by application type");
+        assert_eq!(references[1].title, "Matched configured base URL");
+    }
+
+    #[test]
+    fn confluence_reference_base_url_matching_respects_scheme_host_and_path_boundary() {
+        let cases = [
+            (
+                "https://confluence.example.com/wiki",
+                "https://confluence.example.com/wiki",
+                true,
+            ),
+            (
+                "https://confluence.example.com/wiki/",
+                "https://confluence.example.com/wiki/pages/123",
+                true,
+            ),
+            (
+                "https://confluence.example.com/wiki",
+                "https://confluence.example.com/wikipedia/pages/123",
+                false,
+            ),
+            (
+                "https://confluence.example.com/wiki",
+                "https://other.example.com/wiki/pages/123",
+                false,
+            ),
+            (
+                "https://confluence.example.com/wiki",
+                "http://confluence.example.com/wiki/pages/123",
+                false,
+            ),
+        ];
+
+        for (base_url, link_url, expected) in cases {
+            assert_eq!(
+                remote_link_matches_base_url(base_url, link_url),
+                expected,
+                "base URL case: {base_url} vs {link_url}"
+            );
+        }
+    }
+    #[test]
+    fn confluence_reference_application_identification_requires_exact_type_or_name_fallback() {
+        let link = |id: u64, url: &str, application_type: Option<&str>, name: Option<&str>| {
+            JiraRemoteLink {
+                id,
+                global_id: None,
+                application: Some(cnowledje::models::JiraRemoteLinkApplication {
+                    application_type: application_type.map(str::to_string),
+                    name: name.map(str::to_string),
+                }),
+                relationship: None,
+                object: Some(cnowledje::models::JiraRemoteLinkObject {
+                    url: url.to_string(),
+                    title: format!("Reference {id}"),
+                    summary: None,
+                }),
+            }
+        };
+
+        let references = map_confluence_references(
+            vec![
+                link(
+                    1,
+                    "https://other.example.com/exact-type",
+                    Some("COM.ATLASSIAN.CONFLUENCE"),
+                    Some("Unrelated application name"),
+                ),
+                link(
+                    2,
+                    "https://other.example.com/exact-name",
+                    None,
+                    Some("Confluence"),
+                ),
+                link(
+                    3,
+                    "https://other.example.com/name-only-partial",
+                    Some("com.atlassian.jira"),
+                    Some("Confluence Cloud"),
+                ),
+                link(
+                    4,
+                    "https://other.example.com/name-only-exact",
+                    Some("com.atlassian.jira"),
+                    Some("Confluence"),
+                ),
+            ],
+            None,
+        );
+
+        assert_eq!(
+            references.iter().map(|reference| reference.id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "only the exact Confluence application type or type-less exact name identifies Confluence"
+        );
+    }
+
+    #[test]
+    fn confluence_reference_mapping_validates_and_normalizes_urls_before_deduplication() {
+        let link = |id: u64, url: &str, application_type: Option<&str>| JiraRemoteLink {
+            id,
+            global_id: None,
+            application: application_type.map(|application_type| {
+                cnowledje::models::JiraRemoteLinkApplication {
+                    application_type: Some(application_type.to_string()),
+                    name: None,
+                }
+            }),
+            relationship: None,
+            object: Some(cnowledje::models::JiraRemoteLinkObject {
+                url: url.to_string(),
+                title: format!("Reference {id}"),
+                summary: None,
+            }),
+        };
+
+        let references = map_confluence_references(
+            vec![
+                link(
+                    1,
+                    "pages/viewpage.action?pageId=123",
+                    Some("com.atlassian.confluence"),
+                ),
+                link(
+                    2,
+                    "https://confluence.example.com/wiki/pages/viewpage.action?pageId=123",
+                    None,
+                ),
+                link(
+                    3,
+                    "ftp://confluence.example.com/wiki/pages/3",
+                    Some("com.atlassian.confluence"),
+                ),
+                link(
+                    4,
+                    "https://user:password@confluence.example.com/wiki/pages/4",
+                    Some("com.atlassian.confluence"),
+                ),
+                link(
+                    5,
+                    "http://confluence.example.com/wiki/pages/5",
+                    Some("com.atlassian.confluence"),
+                ),
+            ],
+            Some("https://confluence.example.com/wiki/"),
+        );
+
+        assert_eq!(
+            references.iter().map(|reference| reference.id).collect::<Vec<_>>(),
+            vec![1, 5],
+            "relative and absolute spellings of one URL dedupe, while unsafe schemes and userinfo are rejected"
+        );
+        assert_eq!(
+            references[0].url,
+            "https://confluence.example.com/wiki/pages/viewpage.action?pageId=123"
+        );
+        assert_eq!(
+            references[1].url,
+            "http://confluence.example.com/wiki/pages/5"
+        );
+    }
+
+    #[test]
+    fn confluence_reference_mapping_joins_relative_urls_under_base_path_without_trailing_slash() {
+        let link = |id: u64, url: &str, application_type: Option<&str>| JiraRemoteLink {
+            id,
+            global_id: None,
+            application: application_type.map(|application_type| {
+                cnowledje::models::JiraRemoteLinkApplication {
+                    application_type: Some(application_type.to_string()),
+                    name: None,
+                }
+            }),
+            relationship: None,
+            object: Some(cnowledje::models::JiraRemoteLinkObject {
+                url: url.to_string(),
+                title: format!("Reference {id}"),
+                summary: None,
+            }),
+        };
+
+        let references = map_confluence_references(
+            vec![
+                link(
+                    1,
+                    "pages/viewpage.action?pageId=123",
+                    Some("com.atlassian.confluence"),
+                ),
+                link(
+                    2,
+                    "https://confluence.example.com/wiki/pages/viewpage.action?pageId=123",
+                    None,
+                ),
+            ],
+            Some("https://confluence.example.com/wiki"),
+        );
+
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| reference.id)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "a relative URL under a base path must dedupe with its absolute spelling"
+        );
+        assert_eq!(
+            references[0].url,
+            "https://confluence.example.com/wiki/pages/viewpage.action?pageId=123"
+        );
+    }
+
+    #[test]
+    fn origin_only_confluence_base_requires_a_known_page_url_shape() {
+        let link = |id: u64, url: &str| JiraRemoteLink {
+            id,
+            global_id: None,
+            application: None,
+            relationship: None,
+            object: Some(cnowledje::models::JiraRemoteLinkObject {
+                url: url.to_string(),
+                title: format!("Reference {id}"),
+                summary: None,
+            }),
+        };
+
+        let references = map_confluence_references(
+            vec![
+                link(1, "https://confluence.example.com/not-a-confluence-page"),
+                link(
+                    2,
+                    "https://confluence.example.com/pages/viewpage.action?pageId=123",
+                ),
+            ],
+            Some("https://confluence.example.com"),
+        );
+
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| reference.id)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "an origin-only base must not classify arbitrary same-origin paths as Confluence"
+        );
     }
 }
