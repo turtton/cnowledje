@@ -48,7 +48,7 @@ impl JiraClient {
                 ("maxResults", max_results.to_string()),
                 (
                     "fields",
-                    "summary,status,issuetype,priority,assignee,project,updated".to_string(),
+                    "summary,status,issuetype,priority,assignee,project,labels,updated".to_string(),
                 ),
             ])
             .send()

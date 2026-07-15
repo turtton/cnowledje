@@ -54,11 +54,20 @@ NOTES:
   * --limit is capped by each participating backend's configured max_limit
     (default 50).
   * --json output shape:
-      { \"query\", \"confluence\": { \"query\", \"spaces\", \"labels\", \"search_in\", \"results\": [...] } | null,
-        \"jira\": { \"query\", \"projects\", \"jql\", \"total\", \"results\": [...] } | null }
+      { \"query\", \"confluence\": { \"query\", \"spaces\", \"labels\", \"search_in\", \"returned\", \"has_more\", \"results\": [...] } | null,
+        \"jira\": { \"query\", \"projects\", \"jql\", \"total\", \"returned\", \"has_more\", \"results\": [
+          { ..., \"labels\", \"project_name\" }
+        ] } | null }
     For label-only Confluence searches, \"query\" and \"search_in\" are null.
-    The Confluence and Jira result objects retain their existing fields. A
-    backend that was not searched is represented as null.";
+    Confluence and Jira result objects retain their existing fields; Jira search
+    results additionally include \"labels\" and \"project_name\". The Jira \"jql\"
+    field remains in JSON for compatibility, but JQL is not shown in human output.
+    \"returned\" is the final number of results in the response. \"has_more\" is
+    pagination metadata only; search does not fetch a next page. Confluence sets
+    it from a participating leg's next link or excess deduplicated unique results;
+    Jira sets it when \"total\" exceeds \"returned\". A backend that was not searched
+    is represented as null.
+";
 
 const PAGE_AFTER_HELP: &str = "\
 EXAMPLES:

@@ -780,35 +780,118 @@ fn config_save_omits_none_jira_fields() {
 }
 
 #[test]
-fn unified_search_output_keeps_null_jira_and_nested_confluence_shape() {
-    let confluence = models::SearchOutput {
+fn unified_search_output_preserves_legacy_fields_and_adds_pagination_fields() {
+    let output = models::UnifiedSearchOutput {
         query: Some("release readiness".into()),
-        spaces: vec!["ENG".into()],
-        labels: vec![],
-        search_in: Some("both".into()),
-        results: vec![models::SearchResultOutput {
-            id: "123".into(),
-            title: "Release readiness".into(),
-            space_key: "ENG".into(),
-            space_name: "Engineering".into(),
-            url: "https://confluence.example.com/pages/123".into(),
-            last_modified: Some("2026-07-10T00:00:00Z".into()),
-            matched_by: vec!["title".into()],
-            labels: vec![],
-            excerpt: Some("Ready for release".into()),
-        }],
+        confluence: Some(models::SearchOutput {
+            query: Some("release readiness".into()),
+            spaces: vec!["ENG".into()],
+            labels: vec!["public".into()],
+            search_in: Some("both".into()),
+            returned: 1,
+            has_more: false,
+            results: vec![models::SearchResultOutput {
+                id: "123".into(),
+                title: "Release readiness".into(),
+                space_key: "ENG".into(),
+                space_name: "Engineering".into(),
+                url: "https://confluence.example.com/pages/123".into(),
+                last_modified: Some("2026-07-10T00:00:00Z".into()),
+                matched_by: vec!["title".into()],
+                labels: vec!["release".into()],
+                excerpt: Some("Ready for release".into()),
+            }],
+        }),
+        jira: Some(models::JiraSearchOutput {
+            query: Some("release readiness".into()),
+            projects: vec!["OPS".into()],
+            jql: "project = OPS ORDER BY updated DESC".into(),
+            total: 4,
+            returned: 1,
+            has_more: true,
+            results: vec![models::JiraSearchResultOutput {
+                key: "OPS-42".into(),
+                summary: "Release readiness".into(),
+                status: Some("Open".into()),
+                issue_type: Some("Task".into()),
+                priority: Some("High".into()),
+                assignee: Some("Ada Lovelace".into()),
+                project_key: Some("OPS".into()),
+                project_name: Some("Operations".into()),
+                labels: vec!["release".into()],
+                url: "https://jira.example.com/browse/OPS-42".into(),
+                updated: Some("2026-07-11T00:00:00.000+0000".into()),
+            }],
+        }),
     };
-    let expected_confluence = serde_json::to_value(&confluence).unwrap();
-    let unified = models::UnifiedSearchOutput {
+
+    let json = serde_json::to_value(output).unwrap();
+    let expected = serde_json::json!({
+        "query": "release readiness",
+        "confluence": {
+            "query": "release readiness",
+            "spaces": ["ENG"],
+            "labels": ["public"],
+            "search_in": "both",
+            "returned": 1,
+            "has_more": false,
+            "results": [{
+                "id": "123",
+                "title": "Release readiness",
+                "space_key": "ENG",
+                "space_name": "Engineering",
+                "url": "https://confluence.example.com/pages/123",
+                "last_modified": "2026-07-10T00:00:00Z",
+                "matched_by": ["title"],
+                "labels": ["release"],
+                "excerpt": "Ready for release"
+            }]
+        },
+        "jira": {
+            "query": "release readiness",
+            "projects": ["OPS"],
+            "jql": "project = OPS ORDER BY updated DESC",
+            "total": 4,
+            "returned": 1,
+            "has_more": true,
+            "results": [{
+                "key": "OPS-42",
+                "summary": "Release readiness",
+                "status": "Open",
+                "issue_type": "Task",
+                "priority": "High",
+                "assignee": "Ada Lovelace",
+                "project_key": "OPS",
+                "project_name": "Operations",
+                "labels": ["release"],
+                "url": "https://jira.example.com/browse/OPS-42",
+                "updated": "2026-07-11T00:00:00.000+0000"
+            }]
+        }
+    });
+    assert_eq!(json, expected);
+}
+
+#[test]
+fn unified_search_output_keeps_null_jira_and_nested_confluence_shape() {
+    let output = models::UnifiedSearchOutput {
         query: Some("release readiness".into()),
-        confluence: Some(confluence),
+        confluence: Some(models::SearchOutput {
+            query: Some("release readiness".into()),
+            spaces: vec!["ENG".into()],
+            labels: vec![],
+            search_in: Some("both".into()),
+            returned: 0,
+            has_more: false,
+            results: vec![],
+        }),
         jira: None,
     };
 
-    let json = serde_json::to_value(unified).unwrap();
-
+    let json = serde_json::to_value(output).unwrap();
     assert_eq!(json.get("jira"), Some(&serde_json::Value::Null));
-    assert_eq!(json.get("confluence"), Some(&expected_confluence));
+    assert_eq!(json["confluence"]["returned"], serde_json::json!(0));
+    assert_eq!(json["confluence"]["has_more"], serde_json::json!(false));
 }
 
 #[test]
@@ -818,6 +901,8 @@ fn label_only_search_output_serializes_null_query_and_search_in() {
         spaces: vec!["DEV".into()],
         labels: vec![],
         search_in: None,
+        returned: 0,
+        has_more: false,
         results: vec![],
     };
 
@@ -825,6 +910,8 @@ fn label_only_search_output_serializes_null_query_and_search_in() {
     assert_eq!(json.get("query"), Some(&serde_json::Value::Null));
     assert_eq!(json.get("search_in"), Some(&serde_json::Value::Null));
     assert_eq!(json.get("labels"), Some(&serde_json::json!([])));
+    assert_eq!(json.get("returned"), Some(&serde_json::json!(0)));
+    assert_eq!(json.get("has_more"), Some(&serde_json::json!(false)));
 }
 
 #[test]
@@ -889,6 +976,119 @@ fn raw_profile_loader_returns_empty_profile_for_missing_path_or_profile() {
     assert_eq!(
         serde_json::to_value(missing_profile).unwrap(),
         serde_json::to_value(ProfileConfig::default()).unwrap()
+    );
+}
+
+#[test]
+fn confluence_search_response_deserializes_links_next() {
+    let response: models::SearchResponse = serde_json::from_value(serde_json::json!({
+        "results": [],
+        "size": 0,
+        "_links": {
+            "base": "https://confluence.example.com",
+            "next": "/rest/api/content/search?cursor=abc"
+        }
+    }))
+    .unwrap();
+
+    let links = response.links.expect("response links should be decoded");
+    assert_eq!(
+        links.base.as_deref(),
+        Some("https://confluence.example.com")
+    );
+    assert_eq!(
+        links.next.as_deref(),
+        Some("/rest/api/content/search?cursor=abc")
+    );
+}
+
+#[test]
+fn search_outputs_returned_matches_results_length_for_both_backends() {
+    let confluence = models::SearchOutput {
+        query: Some("query".into()),
+        spaces: vec![],
+        labels: vec![],
+        search_in: Some("title".into()),
+        returned: 1,
+        has_more: false,
+        results: vec![models::SearchResultOutput {
+            id: "123".into(),
+            title: "A page".into(),
+            space_key: "ENG".into(),
+            space_name: "Engineering".into(),
+            url: "https://confluence.example.com/pages/123".into(),
+            last_modified: None,
+            matched_by: vec!["title".into()],
+            labels: vec![],
+            excerpt: None,
+        }],
+    };
+    let jira = models::JiraSearchOutput {
+        query: Some("query".into()),
+        projects: vec!["OPS".into()],
+        jql: "project = OPS".into(),
+        total: 1,
+        returned: 1,
+        has_more: false,
+        results: vec![models::JiraSearchResultOutput {
+            key: "OPS-1".into(),
+            summary: "An issue".into(),
+            status: None,
+            issue_type: None,
+            priority: None,
+            assignee: None,
+            project_key: Some("OPS".into()),
+            project_name: None,
+            labels: vec![],
+            url: "https://jira.example.com/browse/OPS-1".into(),
+            updated: None,
+        }],
+    };
+
+    assert_eq!(confluence.returned as usize, confluence.results.len());
+    assert_eq!(jira.returned as usize, jira.results.len());
+}
+
+#[test]
+fn jira_search_result_fixture_decodes_labels_and_optional_project_name() {
+    let response: models::JiraSearchResponse = serde_json::from_value(serde_json::json!({
+        "total": 2,
+        "issues": [
+            {
+                "key": "OPS-42",
+                "fields": {
+                    "project": {"key": "OPS", "name": "Operations"},
+                    "labels": ["release", "public"]
+                }
+            },
+            {
+                "key": "OPS-43",
+                "fields": {"project": {"key": "OPS"}}
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(
+        response.issues[0].fields.labels.as_ref().unwrap(),
+        &vec!["release".to_string(), "public".to_string()]
+    );
+    assert_eq!(
+        response.issues[0]
+            .fields
+            .project
+            .as_ref()
+            .and_then(|project| project.name.as_deref()),
+        Some("Operations")
+    );
+    assert_eq!(response.issues[1].fields.labels, None);
+    assert_eq!(
+        response.issues[1]
+            .fields
+            .project
+            .as_ref()
+            .and_then(|project| project.name.as_deref()),
+        None
     );
 }
 

@@ -42,6 +42,7 @@ pub struct ResultLinks {
 #[derive(Debug, Deserialize)]
 pub struct ResponseLinks {
     pub base: Option<String>,
+    pub next: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +113,8 @@ pub struct SearchOutput {
     pub spaces: Vec<String>,
     pub labels: Vec<String>,
     pub search_in: Option<String>,
+    pub returned: u32,
+    pub has_more: bool,
     pub results: Vec<SearchResultOutput>,
 }
 
@@ -238,6 +241,8 @@ pub struct JiraSearchOutput {
     pub projects: Vec<String>,
     pub jql: String, // generated JQL, included for transparency
     pub total: u32,  // server-side total hit count
+    pub returned: u32,
+    pub has_more: bool,
     pub results: Vec<JiraSearchResultOutput>,
 }
 
@@ -250,6 +255,8 @@ pub struct JiraSearchResultOutput {
     pub priority: Option<String>,
     pub assignee: Option<String>, // display_name, falling back to name
     pub project_key: Option<String>,
+    pub project_name: Option<String>,
+    pub labels: Vec<String>,
     pub url: String, // make_issue_url
     pub updated: Option<String>,
 }

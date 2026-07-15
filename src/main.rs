@@ -26,8 +26,8 @@ use cnowledje::jql::{build_search_jql, extract_issue_key, JqlFilters};
 use cnowledje::markdown;
 use cnowledje::models::SearchResult;
 use cnowledje::models::{
-    JiraIssueOutput, JiraSearchOutput, JiraSearchResultOutput, PageOutput, SearchOutput,
-    SearchResultOutput, UnifiedSearchOutput, JIRA_NOTICE, NOTICE,
+    JiraIssueOutput, JiraIssueResponse, JiraSearchOutput, JiraSearchResultOutput, PageOutput,
+    SearchOutput, SearchResultOutput, UnifiedSearchOutput, JIRA_NOTICE, NOTICE,
 };
 use cnowledje::skill;
 use cnowledje::types::{IssueFormat, PageFormat, SearchIn, SearchSource};
@@ -314,6 +314,48 @@ async fn run_search(args: cli::SearchArgs) -> Result<(), ConfluenceError> {
     Ok(())
 }
 
+fn confluence_has_more(
+    first_leg_has_next: bool,
+    second_leg_has_next: bool,
+    unique_count: usize,
+    limit: u32,
+) -> bool {
+    first_leg_has_next || second_leg_has_next || unique_count > limit as usize
+}
+
+fn jira_has_more(total: u32, returned: u32) -> bool {
+    total > returned
+}
+
+fn map_jira_search_result(base_url: &str, issue: &JiraIssueResponse) -> JiraSearchResultOutput {
+    let fields = &issue.fields;
+    JiraSearchResultOutput {
+        key: issue.key.clone(),
+        summary: fields.summary.clone().unwrap_or_default(),
+        status: fields.status.as_ref().map(|status| status.name.clone()),
+        issue_type: fields
+            .issuetype
+            .as_ref()
+            .map(|issue_type| issue_type.name.clone()),
+        priority: fields
+            .priority
+            .as_ref()
+            .map(|priority| priority.name.clone()),
+        assignee: fields
+            .assignee
+            .as_ref()
+            .and_then(|user| user.display_name.clone().or_else(|| user.name.clone())),
+        project_key: fields.project.as_ref().map(|project| project.key.clone()),
+        project_name: fields
+            .project
+            .as_ref()
+            .and_then(|project| project.name.clone()),
+        labels: fields.labels.clone().unwrap_or_default(),
+        url: make_issue_url(base_url, &issue.key),
+        updated: fields.updated.clone(),
+    }
+}
+
 async fn search_confluence(
     config: &Config,
     query: Option<&str>,
@@ -324,17 +366,27 @@ async fn search_confluence(
 ) -> Result<SearchOutput, ConfluenceError> {
     let client = ConfluenceClient::new(&config.base_url, &config.api_path, &config.token)?;
     let internal_limit = std::cmp::min(limit * 2, config.max_limit);
-    let groups: Vec<(&'static str, Vec<SearchResult>)> = match query {
+    let groups: Vec<(&'static str, Vec<SearchResult>, bool)> = match query {
         Some(query) => match search_in {
             SearchIn::Title => {
                 let cql = build_title_cql(&spaces, query, labels);
                 let response = client.search(&cql, internal_limit).await?;
-                vec![("title", response.results)]
+                let has_next = response
+                    .links
+                    .as_ref()
+                    .and_then(|links| links.next.as_ref())
+                    .is_some();
+                vec![("title", response.results, has_next)]
             }
             SearchIn::Text => {
                 let cql = build_text_cql(&spaces, query, labels);
                 let response = client.search(&cql, internal_limit).await?;
-                vec![("text", response.results)]
+                let has_next = response
+                    .links
+                    .as_ref()
+                    .and_then(|links| links.next.as_ref())
+                    .is_some();
+                vec![("text", response.results, has_next)]
             }
             SearchIn::Both => {
                 let title_cql = build_title_cql(&spaces, query, labels);
@@ -343,23 +395,38 @@ async fn search_confluence(
                     client.search(&title_cql, internal_limit),
                     client.search(&text_cql, internal_limit)
                 )?;
+                let title_has_next = title_response
+                    .links
+                    .as_ref()
+                    .and_then(|links| links.next.as_ref())
+                    .is_some();
+                let text_has_next = text_response
+                    .links
+                    .as_ref()
+                    .and_then(|links| links.next.as_ref())
+                    .is_some();
                 vec![
-                    ("title", title_response.results),
-                    ("text", text_response.results),
+                    ("title", title_response.results, title_has_next),
+                    ("text", text_response.results, text_has_next),
                 ]
             }
         },
         None => {
             let cql = build_label_cql(&spaces, labels);
             let response = client.search(&cql, internal_limit).await?;
-            vec![("label", response.results)]
+            let has_next = response
+                .links
+                .as_ref()
+                .and_then(|links| links.next.as_ref())
+                .is_some();
+            vec![("label", response.results, has_next)]
         }
     };
 
     let mut seen = HashSet::new();
     let mut matched_by: HashMap<String, Vec<String>> = HashMap::new();
     let mut order = Vec::new();
-    for (matched, group) in &groups {
+    for (matched, group, _) in &groups {
         for result in group {
             if seen.insert(result.id.clone()) {
                 order.push(result.id.clone());
@@ -373,7 +440,7 @@ async fn search_confluence(
 
     let all_results: HashMap<String, &SearchResult> = groups
         .iter()
-        .flat_map(|(_, group)| group.iter())
+        .flat_map(|(_, group, _)| group.iter())
         .map(|result| (result.id.clone(), result))
         .collect();
     let results = order
@@ -391,13 +458,28 @@ async fn search_confluence(
             labels: result.metadata.label_names(),
             excerpt: result.excerpt.clone(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let returned = results.len() as u32;
+    let has_more = confluence_has_more(
+        groups
+            .first()
+            .map(|(_, _, has_next)| *has_next)
+            .unwrap_or(false),
+        groups
+            .get(1)
+            .map(|(_, _, has_next)| *has_next)
+            .unwrap_or(false),
+        order.len(),
+        limit,
+    );
 
     Ok(SearchOutput {
         query: query.map(str::to_string),
         spaces,
         labels: labels.to_vec(),
         search_in: query.is_some().then(|| search_in.to_string()),
+        returned,
+        has_more,
         results,
     })
 }
@@ -523,39 +605,21 @@ async fn search_jira(
     let jql = build_search_jql(&projects, query, filters);
     let client = JiraClient::new(&config.base_url, &config.api_path, &config.token)?;
     let response = client.search(&jql, limit).await?;
+    let total = response.total;
     let results = response
         .issues
         .iter()
-        .map(|issue| {
-            let fields = &issue.fields;
-            JiraSearchResultOutput {
-                key: issue.key.clone(),
-                summary: fields.summary.clone().unwrap_or_default(),
-                status: fields.status.as_ref().map(|status| status.name.clone()),
-                issue_type: fields
-                    .issuetype
-                    .as_ref()
-                    .map(|issue_type| issue_type.name.clone()),
-                priority: fields
-                    .priority
-                    .as_ref()
-                    .map(|priority| priority.name.clone()),
-                assignee: fields
-                    .assignee
-                    .as_ref()
-                    .and_then(|user| user.display_name.clone().or_else(|| user.name.clone())),
-                project_key: fields.project.as_ref().map(|project| project.key.clone()),
-                url: make_issue_url(&config.base_url, &issue.key),
-                updated: fields.updated.clone(),
-            }
-        })
-        .collect();
+        .map(|issue| map_jira_search_result(&config.base_url, issue))
+        .collect::<Vec<_>>();
+    let returned = results.len() as u32;
 
     Ok(JiraSearchOutput {
         query: query.map(str::to_string),
         projects,
         jql,
-        total: response.total,
+        total,
+        returned,
+        has_more: jira_has_more(total, returned),
         results,
     })
 }
@@ -1442,5 +1506,77 @@ mod tests {
                 jira: true,
             }
         );
+    }
+    #[test]
+    fn confluence_has_more_decision_table_covers_links_overflow_and_deduplication() {
+        let cases = [
+            ("next absent and within limit", false, false, 2, 2, false),
+            ("title leg next", true, false, 2, 2, true),
+            ("text leg next", false, true, 2, 2, true),
+            ("unique results overflow limit", false, false, 3, 2, true),
+            (
+                "duplicate results stay within unique limit",
+                false,
+                false,
+                2,
+                2,
+                false,
+            ),
+        ];
+
+        for (name, first_leg_next, second_leg_next, unique_count, limit, expected) in cases {
+            assert_eq!(
+                confluence_has_more(first_leg_next, second_leg_next, unique_count, limit),
+                expected,
+                "decision table case: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn jira_has_more_is_strictly_total_greater_than_returned() {
+        let cases = [("equal", 2, 2, false), ("more available", 3, 2, true)];
+        for (name, total, returned, expected) in cases {
+            assert_eq!(jira_has_more(total, returned), expected, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn jira_search_result_mapping_preserves_labels_and_optional_project_name() {
+        let response: cnowledje::models::JiraSearchResponse =
+            serde_json::from_value(serde_json::json!({
+                "total": 2,
+                "issues": [
+                    {
+                        "key": "OPS-42",
+                        "fields": {
+                            "summary": "Release readiness",
+                            "project": {"key": "OPS", "name": "Operations"},
+                            "labels": ["release", "public"]
+                        }
+                    },
+                    {
+                        "key": "OPS-43",
+                        "fields": {
+                            "summary": "Unlabelled issue",
+                            "project": {"key": "OPS"}
+                        }
+                    }
+                ]
+            }))
+            .unwrap();
+
+        let mapped: Vec<_> = response
+            .issues
+            .iter()
+            .map(|issue| map_jira_search_result("https://jira.example.com", issue))
+            .collect();
+        let first = serde_json::to_value(&mapped[0]).unwrap();
+        assert_eq!(first["labels"], serde_json::json!(["release", "public"]));
+        assert_eq!(first["project_name"], serde_json::json!("Operations"));
+
+        let second = serde_json::to_value(&mapped[1]).unwrap();
+        assert_eq!(second["labels"], serde_json::json!([]));
+        assert_eq!(second["project_name"], serde_json::Value::Null);
     }
 }

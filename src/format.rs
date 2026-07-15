@@ -26,7 +26,15 @@ pub fn print_search_human(output: &SearchOutput) {
     if !output.labels.is_empty() {
         println!("Labels: {}", output.labels.join(", "));
     }
-    println!("Results: {}", output.results.len());
+    println!(
+        "Results: {}{}",
+        output.returned,
+        if output.has_more {
+            " (more available)"
+        } else {
+            ""
+        }
+    );
     println!("{}", "─".repeat(72));
 
     for (i, r) in output.results.iter().enumerate() {
@@ -34,12 +42,12 @@ pub fn print_search_human(output: &SearchOutput) {
         println!("     Space : {} – {}", r.space_key, r.space_name);
         println!("     URL   : {}", r.url);
         if let Some(ts) = &r.last_modified {
-            println!("     Modified : {}", ts);
+            println!("     Updated : {}", ts);
         }
-        println!("     Match  : {}", r.matched_by.join(", "));
         if !r.labels.is_empty() {
             println!("     Labels : {}", r.labels.join(", "));
         }
+        println!("     Match  : {}", r.matched_by.join(", "));
         if let Some(ex) = &r.excerpt {
             let ex = ex.trim().replace('\n', " ");
             let truncated = if ex.chars().count() > 120 {
@@ -174,25 +182,48 @@ pub fn print_jira_search_human(output: &JiraSearchOutput) {
             output.projects.join(", ")
         ),
     }
-    println!("JQL   : {}", output.jql);
-    println!("Results: {} (total {})", output.results.len(), output.total);
+    println!(
+        "Results: {} (total {}){}",
+        output.returned,
+        output.total,
+        if output.has_more {
+            " (more available)"
+        } else {
+            ""
+        }
+    );
     println!("{}", "─".repeat(72));
 
     for (i, r) in output.results.iter().enumerate() {
         println!("{:>3}. {} — {}", i + 1, r.key, r.summary);
+        if r.project_key.is_some() || r.project_name.is_some() {
+            let project = match (&r.project_key, &r.project_name) {
+                (Some(key), Some(name)) => format!("{} – {}", key, name),
+                (Some(key), None) => key.clone(),
+                (None, Some(name)) => name.clone(),
+                (None, None) => unreachable!(),
+            };
+            println!("     Project : {}", project);
+        }
+        println!("     URL     : {}", r.url);
+        if let Some(updated) = &r.updated {
+            println!("     Updated : {}", updated);
+        }
+        if !r.labels.is_empty() {
+            println!("     Labels  : {}", r.labels.join(", "));
+        }
         if let Some(status) = &r.status {
             println!("     Status  : {}", status);
         }
         if let Some(issue_type) = &r.issue_type {
             println!("     Type    : {}", issue_type);
         }
+        if let Some(priority) = &r.priority {
+            println!("     Priority: {}", priority);
+        }
         if let Some(assignee) = &r.assignee {
             println!("     Assignee: {}", assignee);
         }
-        if let Some(updated) = &r.updated {
-            println!("     Updated : {}", updated);
-        }
-        println!("     URL     : {}", r.url);
         println!();
     }
 }

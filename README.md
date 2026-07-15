@@ -188,7 +188,7 @@ cnowledje search --source jira --project DEV --assignee jdoe
 cnowledje search "redis" --source jira --project DEV --limit 20
 ```
 
-`--space` and `--in` apply only to Confluence. `--project`, `--status`, `--assignee`, `--reporter`, `--type`, and `--label` apply only to Jira; passing a flag for a backend excluded by `--source` is an error. Without a query, at least one Jira filter is required. A filters-only search is automatically Jira-only only when `--source` and Confluence-specific flags are both omitted.
+`--space` and `--in` apply only to Confluence. `--project`, `--status`, `--assignee`, `--reporter`, and `--type` apply only to Jira; `--label` applies to both Confluence and Jira. Passing a flag for a backend excluded by `--source` is an error. Without a query, at least one Jira filter or `--label` is required. A filters-only search is automatically Jira-only only when `--source` and Confluence-specific flags are both omitted.
 
 A backend selected explicitly by `--source` (including `--source all`) or given one of its own flags is pinned: configuration errors fail the command. An unpinned backend can be skipped with a warning only when it has no base URL or no configured/default space or project. If both backends run, they run concurrently and either failure fails the command.
 
@@ -200,14 +200,37 @@ A backend selected explicitly by `--source` (including `--source all`) or given 
   "confluence": {
     "query": "Redis 設計",
     "spaces": ["DEV"],
+    "labels": [],
     "search_in": "both",
+    "returned": 0,
+    "has_more": false,
     "results": []
   },
-  "jira": null
+  "jira": {
+    "query": "Redis 設計",
+    "projects": ["DEV"],
+    "jql": "project = \"DEV\" AND text ~ \"Redis 設計\" ORDER BY updated DESC",
+    "total": 1,
+    "returned": 1,
+    "has_more": false,
+    "results": [{
+      "key": "DEV-1",
+      "summary": "Redis timeout",
+      "status": "Open",
+      "issue_type": "Bug",
+      "priority": "High",
+      "assignee": "jdoe",
+      "project_key": "DEV",
+      "url": "https://jira.example.local/browse/DEV-1",
+      "updated": "2026-07-15T12:00:00Z",
+      "labels": ["backend"],
+      "project_name": "Development"
+    }]
+  }
 }
 ```
 
-### Page
+Search pagination is metadata-only: `returned` is the final number of results in the response and `has_more` indicates that more matching results may exist; the command does not fetch a next page. Confluence sets `has_more` when a participating search leg reports a next link or deduplication finds more unique results than the limit; Jira sets it when `total` exceeds `returned`. For Jira, the JSON `jql` field is retained for compatibility, but generated JQL is omitted from human output. Confluence results continue to expose their backend-specific `matched_by` and `excerpt` fields; these are not added to Jira results.
 
 ```bash
 # Get page as Markdown (default)
