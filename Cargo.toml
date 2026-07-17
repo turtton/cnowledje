@@ -2,7 +2,11 @@
 name = "cnowledje"
 version = "0.1.0"
 edition = "2021"
-description = "Read-only Confluence CLI for Server/Data Center"
+description = "Read-only Confluence and Jira CLI for Server/Data Center"
+repository = "https://github.com/turtton/cnowledje"
+homepage = "https://github.com/turtton/cnowledje"
+license = "MIT"
+readme = "README.md"
 
 [lib]
 name = "cnowledje"

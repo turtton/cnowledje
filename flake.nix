@@ -1,5 +1,5 @@
 {
-  description = "Read-only Confluence CLI for Server/Data Center";
+  description = "Read-only Confluence and Jira CLI for Server/Data Center";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   inputs.systems.url = "github:nix-systems/default";
   inputs.flake-utils = {
@@ -23,6 +23,7 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
+        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
         pkgs = import nixpkgs {
           inherit system;
           overlays = [ llm-agents.overlays.shared-nixpkgs ];
@@ -33,7 +34,7 @@
 
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "cnowledje";
-          version = "0.1.0";
+          version = cargoToml.package.version;
 
           src = ./.;
 
@@ -43,7 +44,7 @@
           buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.dbus ];
 
           meta = {
-            description = "Read-only Confluence CLI for Server/Data Center";
+            description = "Read-only Confluence and Jira CLI for Server/Data Center";
             homepage = "https://github.com/turtton/cnowledje";
             license = pkgs.lib.licenses.mit;
             mainProgram = "cnowledje";

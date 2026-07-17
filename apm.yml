@@ -1,6 +1,6 @@
 name: cnowledje
-version: 1.0.0
-description: Read-only Confluence CLI for Server/Data Center
+version: 0.1.0
+description: Read-only Confluence and Jira CLI for Server/Data Center
 author: turtton
 # Which agent platforms to deploy to.
 # Resolution order: --target flag > this field > auto-detect from filesystem.

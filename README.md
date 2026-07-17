@@ -29,9 +29,59 @@ service account on Confluence/Jira with View-only permission.
 
 ## Installation
 
+### macOS: GitHub Releases
+
+Release assets are published for Apple Silicon (`aarch64-apple-darwin`) and
+Intel (`x86_64-apple-darwin`) Macs. The release tag is SemVer, and the version
+in `Cargo.toml` is the canonical version source.
+
+Choose the asset for the current Mac, verify its SHA-256 checksum, and install
+the binary into `~/.local/bin`:
+
 ```bash
-cargo install --path .
+set -euo pipefail
+VERSION=0.1.0
+case "$(uname -m)" in
+  arm64)  TARGET=aarch64-apple-darwin ;;
+  x86_64) TARGET=x86_64-apple-darwin ;;
+  *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+ARCHIVE="cnowledje-v${VERSION}-${TARGET}.tar.gz"
+BASE_URL="https://github.com/turtton/cnowledje/releases/download/v${VERSION}"
+mkdir -p "$HOME/.local/bin"
+curl --fail --location --remote-name "$BASE_URL/$ARCHIVE"
+curl --fail --location --remote-name "$BASE_URL/SHA256SUMS"
+grep " $ARCHIVE$" SHA256SUMS | shasum -a 256 -c -
+tar -xzf "$ARCHIVE"
+install -m 0755 "cnowledje-v${VERSION}-${TARGET}/cnowledje" "$HOME/.local/bin/cnowledje"
 ```
+
+Ensure `$HOME/.local/bin` is on `PATH`, then verify the installation:
+
+```bash
+"$HOME/.local/bin/cnowledje" --version
+```
+
+For a specific release, replace `VERSION` with its `vX.Y.Z` tag without the
+leading `v`. After the repository's GitHub **immutable releases** setting is
+enabled, published releases cannot be changed; a correction requires a new patch release.
+
+### Nix
+
+The flake reads the package version from `Cargo.toml`:
+
+```bash
+nix profile install github:turtton/cnowledje/v0.1.0
+```
+
+### From source
+
+```bash
+cargo install --git https://github.com/turtton/cnowledje --tag v0.1.0 --locked
+```
+
+For local development, `cargo install --path .` remains available.
 
 ### Agent skill
 
@@ -59,6 +109,8 @@ cnowledje skill install --force   # use after upgrading cnowledje
 > integrations (Copilot, OpenCode) via the `apm` tool during development.
 > `skill install` is the end-user path — it works from any installed binary
 > regardless of whether the source repository is present.
+
+Maintainers should follow the [release procedure](RELEASING.md) when publishing a version.
 
 ## Configuration
 

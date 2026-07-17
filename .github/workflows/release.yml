@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag and package versions
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="$(python3 scripts/check-release-version.py "$RELEASE_TAG")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-targets --locked
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: |
+          rustup target add "$TARGET"
+          cargo build --release --locked --target "$TARGET"
+
+      - name: Smoke test release binary
+        run: |
+          binary="target/$TARGET/release/cnowledje"
+          test "$("$binary" --version)" = "cnowledje $VERSION"
+          file "$binary"
+
+      - name: Package release asset
+        run: |
+          asset="cnowledje-v$VERSION-$TARGET.tar.gz"
+          python3 scripts/package-release.py \
+            --binary "target/$TARGET/release/cnowledje" \
+            --output "$asset" \
+            --root-dir "cnowledje-v$VERSION-$TARGET"
+          gzip -t "$asset"
+          tar -tzf "$asset"
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: cnowledje-v${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify assets and create checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(release-assets/*.tar.gz)
+          test "${#assets[@]}" -eq 2
+          (cd release-assets && LC_ALL=C sha256sum ./*.tar.gz | sed 's#^\./##' > SHA256SUMS)
+          (cd release-assets && sha256sum -c SHA256SUMS)
+
+      - name: Create or reuse a draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GH_REPO" --json isDraft --jq '.isDraft' >/tmp/release-is-draft; then
+            if [[ "$(cat /tmp/release-is-draft)" != "true" ]]; then
+              echo "A published release already exists for $TAG; refusing to modify it." >&2
+              exit 1
+            fi
+            echo "Reusing the existing draft release for $TAG."
+          else
+            args=("$TAG" --draft --verify-tag --title "cnowledje $TAG" --generate-notes --repo "$GH_REPO")
+            if [[ "$TAG" == *-* ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "${args[@]}"
+          fi
+
+      - name: Upload all release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(release-assets/*.tar.gz)
+          gh release upload "$TAG" "${assets[@]}" release-assets/SHA256SUMS --clobber --repo "$GH_REPO"
+
+      - name: Publish the complete release
+        run: gh release edit "$TAG" --draft=false --repo "$GH_REPO"
