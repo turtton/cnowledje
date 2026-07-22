@@ -67,6 +67,30 @@ For a specific release, replace `VERSION` with its `vX.Y.Z` tag without the
 leading `v`. After the repository's GitHub **immutable releases** setting is
 enabled, published releases cannot be changed; a correction requires a new patch release.
 
+### Homebrew
+
+The [`turtton/tap`](https://github.com/turtton/homebrew-tap) tap builds
+`cnowledje` locally from source with Rust:
+
+```bash
+brew tap turtton/tap
+brew install cnowledje
+```
+
+You can also install it without adding the tap separately:
+
+```bash
+brew install turtton/tap/cnowledje
+```
+
+Verify the installation and upgrade it later with:
+
+```bash
+cnowledje --version
+brew update
+brew upgrade cnowledje
+```
+
 ### Nix
 
 The flake reads the package version from `Cargo.toml`:
