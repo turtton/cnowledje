@@ -83,7 +83,7 @@ Token keyring commands: `cnowledje config token set [--profile <name>] [--jira]`
 - **CQL is generated internally** — raw CQL input from users/agents is intentionally not supported.
 - **Token redaction** — `CONFLUENCE_TOKEN` and `JIRA_TOKEN` are never logged; both `ConfluenceClient`/`JiraClient` mark their Bearer header `sensitive` via the shared `client::build_http_client`. Tracing output goes to stderr only.
 - **Confluence macros** (`ac:structured-macro`) — supported macros are converted as follows:
-  - `expand` → `**▸ title**` + body inline
+  - `expand` → `<details open>` with `<summary>▸ title</summary>`, expanded body, and a closing `</details>` boundary
   - `code` / `noformat` → fenced code block (with language for `code`)
   - `info` / `note` / `warning` / `tip` → `> **Label:**` blockquote
   - `panel` → blockquote with optional title header

@@ -529,14 +529,86 @@ fn markdown_confluence_code_macro() {
 }
 
 #[test]
-fn markdown_confluence_expand_macro() {
+fn markdown_confluence_expand_macro_has_explicit_boundary() {
     let html = r#"<ac:structured-macro ac:name="expand">
   <ac:parameter ac:name="title">Details</ac:parameter>
   <ac:rich-text-body><p>Expanded body content.</p></ac:rich-text-body>
 </ac:structured-macro>"#;
     let md = markdown::html_to_markdown(html, 50_000, None);
-    assert!(md.contains("**▸ Details**"), "expand title: {}", md);
-    assert!(md.contains("Expanded body content."), "expand body: {}", md);
+    assert_eq!(
+        md, "<details open>\n<summary>▸ Details</summary>\n\nExpanded body content.\n\n</details>",
+        "expand output must delimit the rendered body with an explicit closing tag"
+    );
+}
+
+#[test]
+fn markdown_confluence_expand_macro_default_title_and_empty_body() {
+    let html = r#"<ac:structured-macro ac:name="expand">
+  <ac:rich-text-body></ac:rich-text-body>
+</ac:structured-macro>"#;
+    let md = markdown::html_to_markdown(html, 50_000, None);
+    assert_eq!(
+        md, "<details open>\n<summary>▸ Expand</summary>\n\n</details>",
+        "an empty expand still needs a visible range and the default title"
+    );
+}
+
+#[test]
+fn markdown_confluence_expand_macro_nesting_keeps_body_inside_range() {
+    let html = r#"<ac:structured-macro ac:name="expand">
+  <ac:parameter ac:name="title">Outer</ac:parameter>
+  <ac:rich-text-body>
+    <p>Outer before.</p>
+    <ac:structured-macro ac:name="expand">
+      <ac:parameter ac:name="title">Inner</ac:parameter>
+      <ac:rich-text-body><p>Inner body.</p></ac:rich-text-body>
+    </ac:structured-macro>
+    <p>Outer after.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+<p>Outside after.</p>"#;
+    let md = markdown::html_to_markdown(html, 50_000, None);
+
+    assert_eq!(md.matches("<details open>").count(), 2);
+    assert_eq!(md.matches("</details>").count(), 2);
+
+    let outer_open = md.find("<details open>").expect("outer expand opening tag");
+    let outer_close = md.rfind("</details>").expect("outer expand closing tag");
+    let inner_open = md[outer_open + "<details open>".len()..]
+        .find("<details open>")
+        .map(|offset| outer_open + "<details open>".len() + offset)
+        .expect("nested expand opening tag");
+    let inner_close = md[inner_open + "<details open>".len()..]
+        .find("</details>")
+        .map(|offset| inner_open + "<details open>".len() + offset)
+        .expect("nested expand closing tag");
+
+    assert!(
+        outer_open < inner_open,
+        "nested expand must be inside outer expand"
+    );
+    assert!(
+        inner_open < inner_close,
+        "nested expand must close after opening"
+    );
+    assert!(
+        inner_close < outer_close,
+        "outer expand must close after nested expand"
+    );
+    assert!(
+        md[outer_open..outer_close].contains("Outer before.")
+            && md[outer_open..outer_close].contains("Outer after."),
+        "outer body must remain inside the outer range: {md}"
+    );
+    assert!(
+        md[inner_open..inner_close].contains("Inner body."),
+        "nested body must remain inside the nested range: {md}"
+    );
+    assert_eq!(
+        md[outer_close + "</details>".len()..].trim(),
+        "Outside after.",
+        "content following an expand must come after its closing tag"
+    );
 }
 
 #[test]

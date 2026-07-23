@@ -920,10 +920,11 @@ fn convert_macro(elem: ElementRef<'_>, name: &str, out: &mut String, ctx: &mut C
                 .attr("data-macro-param-title")
                 .filter(|t| !t.is_empty())
                 .unwrap_or("Expand");
-            out.push('\n');
-            out.push_str(&format!("**▸ {}**", title));
-            out.push('\n');
+            out.push_str("\n<details open>\n<summary>▸ ");
+            out.push_str(&escape_html_text(title));
+            out.push_str("</summary>\n\n");
             convert_children(elem, out, ctx);
+            out.push_str("\n</details>\n");
         }
 
         // ── Code block ────────────────────────────────────────────────────────
@@ -1346,10 +1347,24 @@ mod tests {
   <ac:rich-text-body><p>Hidden content here.</p></ac:rich-text-body>
 </ac:structured-macro>"#;
         let md = html_to_markdown(html, 50_000, None);
-        assert!(md.contains("**▸ Click to expand**"), "title should appear");
+        assert!(
+            md.contains("<details open>"),
+            "expand opening tag should appear"
+        );
+        assert!(
+            md.contains("<summary>▸ Click to expand</summary>"),
+            "title should appear in the summary"
+        );
         assert!(
             md.contains("Hidden content here."),
             "body should be expanded"
+        );
+        let summary = md.find("<summary>").expect("summary should appear");
+        let body = md.find("Hidden content here.").expect("body should appear");
+        let closing = md.find("</details>").expect("closing tag should appear");
+        assert!(
+            summary < body && body < closing,
+            "body must be inside expand range"
         );
         assert!(!md.contains("[unsupported confluence macro: expand]"));
     }
@@ -1361,12 +1376,13 @@ mod tests {
 </ac:structured-macro>"#;
         let md = html_to_markdown(html, 50_000, None);
         assert!(
-            md.contains("**▸ Expand**"),
-            "default title 'Expand' should be used"
+            md.contains("<summary>▸ Expand</summary>"),
+            "default title 'Expand' should be used in the summary"
         );
+        assert!(md.contains("<details open>"));
         assert!(md.contains("Body text."));
+        assert!(md.contains("</details>"), "closing tag should appear");
     }
-
     // ── Code macro ────────────────────────────────────────────────────────────
 
     #[test]
@@ -1637,8 +1653,20 @@ second line]]></ac:plain-text-body>
   </ac:rich-text-body>
 </ac:structured-macro>"#;
         let md = html_to_markdown(html, 50_000, None);
-        assert!(md.contains("**▸ Show Code**"), "expand title should appear");
-        assert!(md.contains("```python"), "code fence with language");
+        let details_open = md
+            .find("<details open>")
+            .expect("expand opening tag should appear");
+        let summary = md
+            .find("<summary>▸ Show Code</summary>")
+            .expect("expand title should appear in summary");
+        let body = md.find("```python").expect("code fence with language");
+        let closing = md
+            .find("</details>")
+            .expect("expand closing tag should appear");
+        assert!(
+            details_open < summary && summary < body && body < closing,
+            "expand output must order details, summary, body, and closing tag"
+        );
         assert!(md.contains(r#"print("hello")"#), "code body should appear");
     }
 
@@ -1666,13 +1694,21 @@ second line]]></ac:plain-text-body>
 </ac:structured-macro>"#;
         let md = html_to_markdown(html, 50_000, None);
         // html5ever decodes &quot; back to " when reading the attribute value
+        let details_open = md
+            .find("<details open>")
+            .expect("expand opening tag should appear");
+        let summary = md
+            .find(r#"<summary>▸ Say "hello"</summary>"#)
+            .expect("quoted title should appear in summary");
+        let body = md.find("Body.").expect("expand body should appear");
+        let closing = md
+            .find("</details>")
+            .expect("expand closing tag should appear");
         assert!(
-            md.contains(r#"**▸ Say "hello"**"#) || md.contains("**▸ Say"),
-            "title should appear: {md}"
+            details_open < summary && summary < body && body < closing,
+            "expand output must order details, summary, body, and closing tag"
         );
-        assert!(md.contains("Body."));
     }
-
     // ── render_issue_content ──────────────────────────────────────────────────
 
     #[test]
