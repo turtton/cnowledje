@@ -1,4 +1,5 @@
 # cnowledje
+[日本語版](README.ja.md)
 
 Read-only Confluence & Jira CLI for Server / Data Center.
 
