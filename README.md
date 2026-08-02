@@ -196,7 +196,7 @@ allowed_spaces = ["TEST"]
 default_space = "TEST"
 ```
 
-Tokens must come from environment variables. Never write tokens in the config file.
+Tokens may come from environment variables or the system keyring. Never write tokens in the config file.
 
 ### Interactive configuration
 
@@ -221,17 +221,21 @@ Token resolution order:
 Store a token in the system keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager):
 
 ```bash
-cnowledje config token set                    # default profile
-cnowledje config token set --profile staging  # named profile
-cnowledje config token delete                 # remove from keyring
+cnowledje config token confluence set                   # default profile
+cnowledje config token confluence set --profile staging # named profile
+cnowledje config token confluence delete                # remove from keyring
+cnowledje config token confluence delete --profile staging
 
-cnowledje config token set --jira                    # Jira token, default profile
-cnowledje config token set --jira --profile staging  # Jira token, named profile
-cnowledje config token delete --jira                 # remove Jira token from keyring
+cnowledje config token jira set                         # default profile
+cnowledje config token jira set --profile staging       # named profile
+cnowledje config token jira delete                      # remove from keyring
+cnowledje config token jira delete --profile staging
 ```
 
+The backend argument (`confluence` or `jira`) is required. The previous form with `set` or `delete` directly after `token`, including the optional `--jira` selector, is no longer supported.
+
 Jira tokens are stored under a separate keyring service (`cnowledje-jira`)
-from Confluence tokens (`cnowledje`), so both can coexist per profile.
+from Confluence tokens (`cnowledje`), so both can coexist in the same profile.
 
 If `CONFLUENCE_TOKEN` / `JIRA_TOKEN` is set (and non-empty), it always takes
 precedence over the keyring for that backend.

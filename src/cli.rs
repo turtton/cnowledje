@@ -358,35 +358,44 @@ pub enum ConfigSubcommand {
         #[arg(long)]
         jira: bool,
     },
-    /// Manage the API token stored in the system keyring.
+    /// Manage an API token in the system keyring. Choose `confluence` (service `cnowledje`) or
+    /// `jira` (service `cnowledje-jira`) before the `set` or `delete` action.
     Token(TokenArgs),
 }
 
 #[derive(Args)]
 pub struct TokenArgs {
     #[command(subcommand)]
-    pub command: TokenSubcommand,
+    pub command: TokenBackendSubcommand,
 }
 
 #[derive(Subcommand)]
-pub enum TokenSubcommand {
-    /// Store a token in the system keyring for the given profile.
+pub enum TokenBackendSubcommand {
+    /// Manage the Confluence API token in the `cnowledje` keyring service.
+    Confluence(TokenBackendArgs),
+    /// Manage the Jira API token in the `cnowledje-jira` keyring service.
+    Jira(TokenBackendArgs),
+}
+
+#[derive(Args)]
+pub struct TokenBackendArgs {
+    #[command(subcommand)]
+    pub command: TokenAction,
+}
+
+#[derive(Subcommand)]
+pub enum TokenAction {
+    /// Store the token in the backend's keyring service for the given profile.
     Set {
         /// Profile to store the token for.
         #[arg(long, value_parser = parse_profile_name)]
         profile: Option<String>,
-        /// Manage the Jira token instead of the Confluence token.
-        #[arg(long)]
-        jira: bool,
     },
-    /// Remove the token for the given profile from the system keyring.
+    /// Remove the token from the backend's keyring service for the given profile.
     Delete {
         /// Profile to remove the token for.
         #[arg(long, value_parser = parse_profile_name)]
         profile: Option<String>,
-        /// Manage the Jira token instead of the Confluence token.
-        #[arg(long)]
-        jira: bool,
     },
 }
 
@@ -396,7 +405,7 @@ mod tests {
 
     use cnowledje::types::SearchSource;
 
-    use super::{Cli, Commands, ConfigSubcommand};
+    use super::{Cli, Commands, ConfigSubcommand, TokenAction, TokenBackendSubcommand};
 
     #[test]
     fn parses_flattened_issue_command() {
@@ -433,6 +442,181 @@ mod tests {
     #[test]
     fn rejects_removed_jira_command_hierarchy() {
         assert!(Cli::try_parse_from(["cnowledje", "jira", "search", "q"]).is_err());
+    }
+
+    #[test]
+    fn config_token_confluence_set_preserves_absent_profile() {
+        let cli =
+            Cli::try_parse_from(["cnowledje", "config", "token", "confluence", "set"]).unwrap();
+
+        match cli.command {
+            Commands::Config(config) => match config.command {
+                ConfigSubcommand::Token(token) => match token.command {
+                    TokenBackendSubcommand::Confluence(backend) => match backend.command {
+                        TokenAction::Set { profile } => assert_eq!(profile, None),
+                        _ => panic!("expected the confluence set action"),
+                    },
+                    _ => panic!("expected the confluence backend"),
+                },
+                _ => panic!("expected the token configuration command"),
+            },
+            _ => panic!("expected the config command"),
+        }
+    }
+
+    #[test]
+    fn config_token_confluence_delete_trims_profile() {
+        let cli = Cli::try_parse_from([
+            "cnowledje",
+            "config",
+            "token",
+            "confluence",
+            "delete",
+            "--profile",
+            "  staging  ",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Config(config) => match config.command {
+                ConfigSubcommand::Token(token) => match token.command {
+                    TokenBackendSubcommand::Confluence(backend) => match backend.command {
+                        TokenAction::Delete { profile } => {
+                            assert_eq!(profile.as_deref(), Some("staging"))
+                        }
+                        _ => panic!("expected the confluence delete action"),
+                    },
+                    _ => panic!("expected the confluence backend"),
+                },
+                _ => panic!("expected the token configuration command"),
+            },
+            _ => panic!("expected the config command"),
+        }
+    }
+
+    #[test]
+    fn config_token_jira_set_preserves_profile() {
+        let cli = Cli::try_parse_from([
+            "cnowledje",
+            "config",
+            "token",
+            "jira",
+            "set",
+            "--profile",
+            "staging",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Config(config) => match config.command {
+                ConfigSubcommand::Token(token) => match token.command {
+                    TokenBackendSubcommand::Jira(backend) => match backend.command {
+                        TokenAction::Set { profile } => {
+                            assert_eq!(profile.as_deref(), Some("staging"))
+                        }
+                        _ => panic!("expected the jira set action"),
+                    },
+                    _ => panic!("expected the jira backend"),
+                },
+                _ => panic!("expected the token configuration command"),
+            },
+            _ => panic!("expected the config command"),
+        }
+    }
+
+    #[test]
+    fn config_token_jira_delete_preserves_absent_profile() {
+        let cli = Cli::try_parse_from(["cnowledje", "config", "token", "jira", "delete"]).unwrap();
+
+        match cli.command {
+            Commands::Config(config) => match config.command {
+                ConfigSubcommand::Token(token) => match token.command {
+                    TokenBackendSubcommand::Jira(backend) => match backend.command {
+                        TokenAction::Delete { profile } => assert_eq!(profile, None),
+                        _ => panic!("expected the jira delete action"),
+                    },
+                    _ => panic!("expected the jira backend"),
+                },
+                _ => panic!("expected the token configuration command"),
+            },
+            _ => panic!("expected the config command"),
+        }
+    }
+
+    #[test]
+    fn config_token_requires_backend_and_action() {
+        for argv in [
+            vec!["cnowledje", "config", "token"],
+            vec!["cnowledje", "config", "token", "confluence"],
+            vec!["cnowledje", "config", "token", "jira"],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+    }
+
+    #[test]
+    fn config_token_rejects_removed_flat_and_jira_flag_forms() {
+        for argv in [
+            vec!["cnowledje", "config", "token", "set"],
+            vec!["cnowledje", "config", "token", "delete"],
+            vec!["cnowledje", "config", "token", "set", "--jira"],
+            vec!["cnowledje", "config", "token", "delete", "--jira"],
+            vec![
+                "cnowledje",
+                "config",
+                "token",
+                "confluence",
+                "set",
+                "--jira",
+            ],
+            vec!["cnowledje", "config", "token", "jira", "delete", "--jira"],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+    }
+
+    #[test]
+    fn config_token_rejects_blank_profiles() {
+        for argv in [
+            vec![
+                "cnowledje",
+                "config",
+                "token",
+                "confluence",
+                "set",
+                "--profile",
+                "   ",
+            ],
+            vec![
+                "cnowledje",
+                "config",
+                "token",
+                "jira",
+                "delete",
+                "--profile",
+                "\t \t",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err());
+        }
+    }
+
+    #[test]
+    fn config_token_help_lists_backends_without_removed_forms() {
+        let error = Cli::try_parse_from(["cnowledje", "config", "token", "--help"])
+            .err()
+            .expect("--help should return clap's help error");
+        let help = error.to_string();
+
+        assert!(help.contains("confluence"));
+        assert!(help.contains("jira"));
+        assert!(!help.contains("--jira"));
+        assert!(!help
+            .lines()
+            .any(|line| line.trim_start().starts_with("set ")));
+        assert!(!help
+            .lines()
+            .any(|line| line.trim_start().starts_with("delete ")));
     }
 
     #[test]

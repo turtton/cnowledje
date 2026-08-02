@@ -3,7 +3,7 @@ mod cli;
 use clap::Parser;
 use std::collections::{HashMap, HashSet};
 
-use cli::{Cli, Commands, ConfigSubcommand, SkillSubcommand};
+use cli::{Cli, Commands, ConfigSubcommand, SkillSubcommand, TokenAction, TokenBackendSubcommand};
 use cnowledje::client::ConfluenceClient;
 use cnowledje::config::{
     default_config_path, delete_jira_token_from_keyring, delete_token_from_keyring, load_config,
@@ -1013,62 +1013,164 @@ async fn run_config(args: cli::ConfigArgs) -> Result<(), ConfluenceError> {
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenBackend {
+    Confluence,
+    Jira,
+}
+
+impl TokenBackend {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Confluence => "Confluence",
+            Self::Jira => "Jira",
+        }
+    }
+
+    fn env_var(self) -> &'static str {
+        match self {
+            Self::Confluence => "CONFLUENCE_TOKEN",
+            Self::Jira => "JIRA_TOKEN",
+        }
+    }
+
+    fn prompt(self) -> &'static str {
+        match self {
+            Self::Confluence => "Confluence API Token:",
+            Self::Jira => "Jira API Token:",
+        }
+    }
+}
+
+trait TokenKeyring {
+    fn store(
+        &self,
+        backend: TokenBackend,
+        profile: &str,
+        token: &str,
+    ) -> Result<(), ConfluenceError>;
+
+    fn delete(&self, backend: TokenBackend, profile: &str) -> Result<(), ConfluenceError>;
+}
+
+struct SystemTokenKeyring;
+
+impl TokenKeyring for SystemTokenKeyring {
+    fn store(
+        &self,
+        backend: TokenBackend,
+        profile: &str,
+        token: &str,
+    ) -> Result<(), ConfluenceError> {
+        match backend {
+            TokenBackend::Confluence => store_token_in_keyring(profile, token),
+            TokenBackend::Jira => store_jira_token_in_keyring(profile, token),
+        }
+    }
+
+    fn delete(&self, backend: TokenBackend, profile: &str) -> Result<(), ConfluenceError> {
+        match backend {
+            TokenBackend::Confluence => delete_token_from_keyring(profile),
+            TokenBackend::Jira => delete_jira_token_from_keyring(profile),
+        }
+    }
+}
+
+fn validate_token(backend: TokenBackend, token: &str) -> Result<(), ConfluenceError> {
+    if token.trim().is_empty() {
+        return Err(ConfluenceError::ConfigError(format!(
+            "{} token must not be empty.",
+            backend.name()
+        )));
+    }
+    Ok(())
+}
+
+fn store_token_with_keyring<K: TokenKeyring + ?Sized>(
+    keyring: &K,
+    backend: TokenBackend,
+    profile: &str,
+    token: &str,
+) -> Result<(), ConfluenceError> {
+    validate_token(backend, token)?;
+    keyring.store(backend, profile, token)
+}
+
+fn delete_token_with_keyring<K: TokenKeyring + ?Sized>(
+    keyring: &K,
+    backend: TokenBackend,
+    profile: &str,
+) -> Result<(), ConfluenceError> {
+    keyring.delete(backend, profile)
+}
+
+fn token_stored_message(backend: TokenBackend, profile: &str) -> String {
+    format!(
+        "{} token stored in keyring for profile '{}'.",
+        backend.name(),
+        profile
+    )
+}
+
+fn token_deleted_message(backend: TokenBackend, profile: &str) -> String {
+    format!(
+        "{} token removed from keyring for profile '{}'.",
+        backend.name(),
+        profile
+    )
+}
+
 fn run_config_token(args: cli::TokenArgs) -> Result<(), ConfluenceError> {
     use inquire::Password;
 
-    let jira = match &args.command {
-        cli::TokenSubcommand::Set { jira, .. } => *jira,
-        cli::TokenSubcommand::Delete { jira, .. } => *jira,
+    let backend = match &args.command {
+        TokenBackendSubcommand::Confluence(_) => TokenBackend::Confluence,
+        TokenBackendSubcommand::Jira(_) => TokenBackend::Jira,
     };
-    let env_var = if jira {
-        "JIRA_TOKEN"
-    } else {
-        "CONFLUENCE_TOKEN"
-    };
+    let env_var = backend.env_var();
     if std::env::var(env_var)
-        .map(|t| !t.trim().is_empty())
+        .map(|token| !token.trim().is_empty())
         .unwrap_or(false)
     {
         eprintln!(
-            "Note: {} is set and will take precedence over the keyring token.",
-            env_var
+            "Note: {} environment variable {env_var} is set and will take precedence over the {} keyring token.",
+            backend.name(),
+            backend.name()
         );
     }
+
+    let keyring = SystemTokenKeyring;
     match args.command {
-        cli::TokenSubcommand::Set { profile, jira } => {
-            let profile_name = profile.as_deref().unwrap_or("default");
-            let token = Password::new("API Token:")
-                .prompt()
-                .map_err(|e| ConfluenceError::ConfigError(e.to_string()))?;
-            if token.trim().is_empty() {
-                return Err(ConfluenceError::ConfigError(
-                    "Token must not be empty.".to_string(),
-                ));
+        TokenBackendSubcommand::Confluence(backend_args) => match backend_args.command {
+            TokenAction::Set { profile } => {
+                let profile_name = profile.as_deref().unwrap_or("default");
+                let token = Password::new(backend.prompt())
+                    .prompt()
+                    .map_err(|e| ConfluenceError::ConfigError(e.to_string()))?;
+                store_token_with_keyring(&keyring, backend, profile_name, &token)?;
+                println!("{}", token_stored_message(backend, profile_name));
             }
-            if jira {
-                store_jira_token_in_keyring(profile_name, &token)?;
-                println!(
-                    "Jira token stored in keyring for profile '{}'.",
-                    profile_name
-                );
-            } else {
-                store_token_in_keyring(profile_name, &token)?;
-                println!("Token stored in keyring for profile '{}'.", profile_name);
+            TokenAction::Delete { profile } => {
+                let profile_name = profile.as_deref().unwrap_or("default");
+                delete_token_with_keyring(&keyring, backend, profile_name)?;
+                println!("{}", token_deleted_message(backend, profile_name));
             }
-        }
-        cli::TokenSubcommand::Delete { profile, jira } => {
-            let profile_name = profile.as_deref().unwrap_or("default");
-            if jira {
-                delete_jira_token_from_keyring(profile_name)?;
-                println!(
-                    "Jira token removed from keyring for profile '{}'.",
-                    profile_name
-                );
-            } else {
-                delete_token_from_keyring(profile_name)?;
-                println!("Token removed from keyring for profile '{}'.", profile_name);
+        },
+        TokenBackendSubcommand::Jira(backend_args) => match backend_args.command {
+            TokenAction::Set { profile } => {
+                let profile_name = profile.as_deref().unwrap_or("default");
+                let token = Password::new(backend.prompt())
+                    .prompt()
+                    .map_err(|e| ConfluenceError::ConfigError(e.to_string()))?;
+                store_token_with_keyring(&keyring, backend, profile_name, &token)?;
+                println!("{}", token_stored_message(backend, profile_name));
             }
-        }
+            TokenAction::Delete { profile } => {
+                let profile_name = profile.as_deref().unwrap_or("default");
+                delete_token_with_keyring(&keyring, backend, profile_name)?;
+                println!("{}", token_deleted_message(backend, profile_name));
+            }
+        },
     }
     Ok(())
 }
@@ -1451,13 +1553,13 @@ fn run_config_init(profile: String, confluence: bool, jira: bool) -> Result<(), 
     println!("設定を {} に保存しました。", config_path.display());
 
     if configure_confluence {
-        match Confirm::new("APIトークンをキーリングに保存しますか?")
+        match Confirm::new("Confluence APIトークンをキーリングに保存しますか?")
             .with_default(true)
             .with_help_message("Noの場合は環境変数 CONFLUENCE_TOKEN で設定してください")
             .prompt()
         {
             Ok(true) => {
-                let token = match Password::new("API Token:").prompt() {
+                let token = match Password::new("Confluence API Token:").prompt() {
                     Ok(token) => token,
                     Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
                         println!("\nキャンセルされました。(トークンは環境変数 CONFLUENCE_TOKEN で設定してください)");
@@ -1471,7 +1573,7 @@ fn run_config_init(profile: String, confluence: bool, jira: bool) -> Result<(), 
                     ));
                 }
                 store_token_in_keyring(profile_name, &token)?;
-                println!("トークンをキーリングに保存しました。");
+                println!("Confluence トークンをキーリングに保存しました。");
             }
             Ok(false) => println!("(トークンは環境変数 CONFLUENCE_TOKEN で設定してください)"),
             Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
@@ -2037,5 +2139,192 @@ mod tests {
             vec![2],
             "an origin-only base must not classify arbitrary same-origin paths as Confluence"
         );
+    }
+    #[derive(Default)]
+    struct FakeTokenKeyring {
+        stores: std::cell::RefCell<Vec<(TokenBackend, String, String)>>,
+        deletes: std::cell::RefCell<Vec<(TokenBackend, String)>>,
+        store_error: std::cell::RefCell<Option<ConfluenceError>>,
+        delete_error: std::cell::RefCell<Option<ConfluenceError>>,
+    }
+
+    impl FakeTokenKeyring {
+        fn with_store_error(error: ConfluenceError) -> Self {
+            let fake = Self::default();
+            fake.store_error.replace(Some(error));
+            fake
+        }
+
+        fn with_delete_error(error: ConfluenceError) -> Self {
+            let fake = Self::default();
+            fake.delete_error.replace(Some(error));
+            fake
+        }
+    }
+
+    impl TokenKeyring for FakeTokenKeyring {
+        fn store(
+            &self,
+            backend: TokenBackend,
+            profile: &str,
+            token: &str,
+        ) -> Result<(), ConfluenceError> {
+            if let Some(error) = self.store_error.borrow_mut().take() {
+                return Err(error);
+            }
+            self.stores
+                .borrow_mut()
+                .push((backend, profile.to_string(), token.to_string()));
+            Ok(())
+        }
+
+        fn delete(&self, backend: TokenBackend, profile: &str) -> Result<(), ConfluenceError> {
+            if let Some(error) = self.delete_error.borrow_mut().take() {
+                return Err(error);
+            }
+            self.deletes
+                .borrow_mut()
+                .push((backend, profile.to_string()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn token_seam_store_routes_each_backend_and_profile_without_trimming_tokens() {
+        let fake = FakeTokenKeyring::default();
+
+        store_token_with_keyring(
+            &fake,
+            TokenBackend::Confluence,
+            "default",
+            "  confluence-token  ",
+        )
+        .unwrap();
+        store_token_with_keyring(&fake, TokenBackend::Jira, "work", "\tjira-token\n").unwrap();
+
+        let stores = fake.stores.borrow();
+        assert_eq!(stores.len(), 2);
+        assert!(matches!(stores[0].0, TokenBackend::Confluence));
+        assert_eq!(stores[0].1, "default");
+        assert_eq!(stores[0].2, "  confluence-token  ");
+        assert!(matches!(stores[1].0, TokenBackend::Jira));
+        assert_eq!(stores[1].1, "work");
+        assert_eq!(stores[1].2, "\tjira-token\n");
+    }
+
+    #[test]
+    fn token_seam_store_keeps_same_profile_tokens_independent_by_backend() {
+        let fake = FakeTokenKeyring::default();
+
+        store_token_with_keyring(&fake, TokenBackend::Confluence, "default", "confluence").unwrap();
+        store_token_with_keyring(&fake, TokenBackend::Jira, "default", "jira").unwrap();
+
+        let stores = fake.stores.borrow();
+        assert_eq!(stores.len(), 2);
+        assert!(matches!(stores[0].0, TokenBackend::Confluence));
+        assert_eq!(stores[0].1, "default");
+        assert_eq!(stores[0].2, "confluence");
+        assert!(matches!(stores[1].0, TokenBackend::Jira));
+        assert_eq!(stores[1].1, "default");
+        assert_eq!(stores[1].2, "jira");
+    }
+
+    #[test]
+    fn token_seam_delete_routes_each_backend_and_profile_once() {
+        let fake = FakeTokenKeyring::default();
+
+        delete_token_with_keyring(&fake, TokenBackend::Confluence, "default").unwrap();
+        delete_token_with_keyring(&fake, TokenBackend::Jira, "work").unwrap();
+
+        let deletes = fake.deletes.borrow();
+        assert_eq!(deletes.len(), 2);
+        assert!(matches!(deletes[0].0, TokenBackend::Confluence));
+        assert_eq!(deletes[0].1, "default");
+        assert!(matches!(deletes[1].0, TokenBackend::Jira));
+        assert_eq!(deletes[1].1, "work");
+    }
+
+    #[test]
+    fn token_seam_store_and_delete_propagate_keyring_errors_unchanged() {
+        let fake = FakeTokenKeyring::with_store_error(ConfluenceError::KeyringError(
+            "store sentinel".to_string(),
+        ));
+        let store_result =
+            store_token_with_keyring(&fake, TokenBackend::Confluence, "default", "token");
+        assert!(matches!(
+            store_result,
+            Err(ConfluenceError::KeyringError(message)) if message == "store sentinel"
+        ));
+
+        let fake = FakeTokenKeyring::with_delete_error(ConfluenceError::KeyringError(
+            "delete sentinel".to_string(),
+        ));
+        let delete_result = delete_token_with_keyring(&fake, TokenBackend::Jira, "work");
+        assert!(matches!(
+            delete_result,
+            Err(ConfluenceError::KeyringError(message)) if message == "delete sentinel"
+        ));
+    }
+
+    #[test]
+    fn token_seam_whitespace_only_tokens_fail_per_backend_without_store_calls() {
+        let cases = [
+            (
+                TokenBackend::Confluence,
+                "Confluence token must not be empty.",
+            ),
+            (TokenBackend::Jira, "Jira token must not be empty."),
+        ];
+
+        for (backend, expected_message) in cases {
+            let fake = FakeTokenKeyring::default();
+            let result = store_token_with_keyring(&fake, backend, "default", " \t\n ");
+            assert!(matches!(
+                result,
+                Err(ConfluenceError::ConfigError(message)) if message == expected_message
+            ));
+            assert!(fake.stores.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn token_seam_backend_metadata_and_messages_are_backend_specific() {
+        let cases = [
+            (
+                TokenBackend::Confluence,
+                "Confluence",
+                "CONFLUENCE_TOKEN",
+                "Confluence API Token:",
+                "Confluence token stored in keyring for profile 'default'.",
+                "Confluence token removed from keyring for profile 'default'.",
+            ),
+            (
+                TokenBackend::Jira,
+                "Jira",
+                "JIRA_TOKEN",
+                "Jira API Token:",
+                "Jira token stored in keyring for profile 'default'.",
+                "Jira token removed from keyring for profile 'default'.",
+            ),
+        ];
+
+        for (backend, name, env_var, prompt, stored, deleted) in cases {
+            assert_eq!(backend.name(), name);
+            assert_eq!(backend.env_var(), env_var);
+            assert_eq!(backend.prompt(), prompt);
+            assert_eq!(token_stored_message(backend, "default"), stored);
+            assert_eq!(token_deleted_message(backend, "default"), deleted);
+        }
+    }
+
+    #[test]
+    fn token_seam_validate_accepts_nonempty_tokens_and_store_preserves_whitespace() {
+        for token in ["token", " token ", "\ttoken\n"] {
+            assert!(validate_token(TokenBackend::Confluence, token).is_ok());
+        }
+
+        let fake = FakeTokenKeyring::default();
+        store_token_with_keyring(&fake, TokenBackend::Jira, "work", "  token  ").unwrap();
+        assert_eq!(fake.stores.borrow()[0].2, "  token  ");
     }
 }

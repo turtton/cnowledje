@@ -69,7 +69,14 @@ TOML-only settings (no env var override): `default_limit` (default: 10), `max_li
 
 Never write either token in the config file.
 
-Token keyring commands: `cnowledje config token set [--profile <name>] [--jira]` / `cnowledje config token delete [--profile <name>] [--jira]` (`--jira` targets the `cnowledje-jira` keyring service instead of `cnowledje`).
+Token keyring commands require a backend argument:
+```text
+cnowledje config token confluence set [--profile <name>]
+cnowledje config token confluence delete [--profile <name>]
+cnowledje config token jira set [--profile <name>]
+cnowledje config token jira delete [--profile <name>]
+```
+The previous form with `set` or `delete` directly after `token`, including the optional `--jira` selector, is no longer supported. The separate Jira service (`cnowledje-jira`) allows Confluence and Jira tokens to coexist for the same profile.
 
 `cnowledje config check` validates Confluence and Jira **independently** — a backend with no `base_url` configured prints `(not configured)` and is skipped; a backend that resolves `base_url` **and** a token gets its fields printed plus a live connectivity check (Confluence: `content/search`; Jira: `/myself`); a backend with `base_url` set but no resolvable token (or any other config error) prints `configuration error: ...` and is recorded as a failure without a connectivity check. If *both* backends are entirely unconfigured, it errors with `MissingBaseUrl` (legacy single-backend behavior preserved). Otherwise, the first failure encountered across either backend is returned as the command's error.
 `cnowledje config init [--profile <name>] [--confluence] [--jira]` updates configuration interactively without replacing an entire profile. `--confluence` and `--jira` select only those sections and skip the section-selection prompts; without either flag, each section is offered interactively (configured sections default to No). Selected fields are prefilled from the profile and merged back, while unselected backend fields remain unchanged. Existing profiles also keep shared limits unless their separate confirmation is accepted. `config init` has no `--force` option.

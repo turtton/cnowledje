@@ -177,7 +177,7 @@ allowed_spaces = ["TEST"]
 default_space = "TEST"
 ```
 
-トークンは環境変数から取得する必要があります。設定ファイルにトークンを書き込まないでください。
+トークンは環境変数またはシステムキーリングから取得できます。設定ファイルにトークンを書き込まないでください。
 
 ### 対話形式の設定
 
@@ -201,16 +201,20 @@ cnowledje config init --confluence --jira             # update both sections
 システムキーリング（macOS Keychain、Linux Secret Service、Windows Credential Manager）にトークンを保存します。
 
 ```bash
-cnowledje config token set                    # default profile
-cnowledje config token set --profile staging  # named profile
-cnowledje config token delete                 # remove from keyring
+cnowledje config token confluence set                   # default profile
+cnowledje config token confluence set --profile staging # named profile
+cnowledje config token confluence delete                # remove from keyring
+cnowledje config token confluence delete --profile staging
 
-cnowledje config token set --jira                    # Jira token, default profile
-cnowledje config token set --jira --profile staging  # Jira token, named profile
-cnowledje config token delete --jira                 # remove Jira token from keyring
+cnowledje config token jira set                         # default profile
+cnowledje config token jira set --profile staging       # named profile
+cnowledje config token jira delete                      # remove from keyring
+cnowledje config token jira delete --profile staging
 ```
 
-Jiraトークンは、Confluenceトークン（`cnowledje`）とは別のキーリングサービス（`cnowledje-jira`）に保存されるため、プロファイルごとに両方を共存させられます。
+バックエンド引数（`confluence`または`jira`）は必須です。`token`の直後に`set`または`delete`を置き、`--jira`で選択する従来の形式はサポートされません。
+
+Jiraトークンは、Confluenceトークン（`cnowledje`）とは別のキーリングサービス（`cnowledje-jira`）に保存されるため、同じプロファイルで両方を共存させられます。
 
 `CONFLUENCE_TOKEN` / `JIRA_TOKEN`が設定されている（かつ空でない）場合、そのバックエンドでは常にキーリングより優先されます。
 
