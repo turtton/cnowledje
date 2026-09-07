@@ -405,11 +405,22 @@ fn rewrite_macros(html: &str) -> String {
                         .get(..open_tag.len().saturating_sub(1))
                         .is_some_and(|s| s.trim_end().ends_with('/'));
 
-                let kind: &'static str = if INLINE_MACROS.contains(&macro_name.as_str()) {
-                    "span"
+                let (params, after_params) = if is_self_closing {
+                    (Vec::new(), tag_end)
                 } else {
-                    "div"
+                    consume_params(html, tag_end)
                 };
+                let inline_excerpt = macro_name == "excerpt"
+                    && params.iter().any(|(name, value)| {
+                        name == "atlassian-macro-output-type"
+                            && value.eq_ignore_ascii_case("inline")
+                    });
+                let kind: &'static str =
+                    if INLINE_MACROS.contains(&macro_name.as_str()) || inline_excerpt {
+                        "span"
+                    } else {
+                        "div"
+                    };
 
                 let mut tag = format!(
                     r#"<{kind} class="ac-macro" data-macro-name="{}""#,
@@ -424,7 +435,6 @@ fn rewrite_macros(html: &str) -> String {
                     out.push_str(&tag);
                     cursor = tag_end;
                 } else {
-                    let (params, after_params) = consume_params(html, tag_end);
                     for (k, v) in &params {
                         tag.push_str(&format!(r#" data-macro-param-{k}="{v}""#));
                     }
@@ -440,6 +450,93 @@ fn rewrite_macros(html: &str) -> String {
     out
 }
 
+/// Keep the explicit link label instead of concatenating it with the target title.
+/// CDATA must be escaped before the HTML parser (which would discard it).
+fn rewrite_links(html: &str) -> String {
+    static LINK: OnceLock<Regex> = OnceLock::new();
+    static SELF_CLOSING_LINK: OnceLock<Regex> = OnceLock::new();
+    static BODY: OnceLock<Regex> = OnceLock::new();
+    static CDATA: OnceLock<Regex> = OnceLock::new();
+    static ANCHOR: OnceLock<Regex> = OnceLock::new();
+    let anchor = ANCHOR.get_or_init(|| Regex::new(r#"\bac:anchor="([^"]*)""#).unwrap());
+    let link = LINK.get_or_init(|| Regex::new(r"(?s)<ac:link(\s[^>]*)?>(.*?)</ac:link>").unwrap());
+    let body = BODY.get_or_init(|| Regex::new(r"(?s)<ac:(plain-text-link-body|link-body)(?:\s[^>]*)?>(.*?)</ac:(?:plain-text-link-body|link-body)>").unwrap());
+    let cdata = CDATA.get_or_init(|| Regex::new(r"(?s)<!\[CDATA\[(.*?)\]\]>").unwrap());
+    // Normalize empty XML elements before matching paired links. Otherwise a
+    // self-closing link can consume the next link's body and closing tag.
+    let self_closing =
+        SELF_CLOSING_LINK.get_or_init(|| Regex::new(r"<ac:link(\s[^>]*?)?\s*/>").unwrap());
+    let html = self_closing.replace_all(html, |caps: &regex::Captures| {
+        format!(
+            "<ac:link{}></ac:link>",
+            caps.get(1).map_or("", |attrs| attrs.as_str())
+        )
+    });
+    link.replace_all(&html, |caps: &regex::Captures| {
+        let label = if let Some(label) = body.captures(&caps[2]) {
+            cdata
+                .replace_all(&label[2], |text: &regex::Captures| {
+                    escape_html_text(&text[1])
+                })
+                .into_owned()
+        } else {
+            caps[2].to_string()
+        };
+        // A page reference targets another document; never turn it into a local link.
+        if !caps[2].contains("<ri:page") && !caps[2].contains("<ri:attachment") {
+            if let Some(target) = caps
+                .get(1)
+                .and_then(|attrs| anchor.captures(attrs.as_str()))
+            {
+                let fragment = Html::parse_fragment(&format!("<span>{}</span>", &target[1]))
+                    .root_element()
+                    .text()
+                    .collect::<String>();
+                let href = encode_fragment(&fragment);
+                let label = if label.trim().is_empty() {
+                    target[1].to_string()
+                } else {
+                    label
+                };
+                return format!(r##"<a href="#{href}">{label}</a>"##);
+            }
+        }
+        label
+    })
+    .into_owned()
+}
+
+/// Keep Unicode labels readable while escaping characters that can interfere
+/// with Markdown destinations, HTML attributes, or fragment decoding.
+fn encode_fragment(value: &str) -> String {
+    let mut encoded = String::new();
+    for ch in value.chars() {
+        if ch.is_whitespace()
+            || ch.is_control()
+            || matches!(
+                ch,
+                '(' | ')' | '[' | ']' | '<' | '>' | '"' | '\'' | '\\' | '%' | '&' | '#' | '`'
+            )
+        {
+            for byte in ch.encode_utf8(&mut [0; 4]).bytes() {
+                encoded.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            encoded.push(ch);
+        }
+    }
+    encoded
+}
+
+fn emit_anchor(id: &str, out: &mut String) {
+    if !id.is_empty() {
+        out.push_str(&format!(
+            r#"<a id="{}"></a>"#,
+            escape_html_text(id).replace('"', "&quot;")
+        ));
+    }
+}
+
 fn preprocess(html: &str) -> String {
     // ① CDATA / plain-text-body → <pre> (must be first to protect code from
     //   later regex passes).
@@ -447,6 +544,7 @@ fn preprocess(html: &str) -> String {
 
     // ② <ac:structured-macro> → <div|span class="ac-macro" ...>
     let s = rewrite_macros(&s);
+    let s = rewrite_links(&s);
 
     // ③ Inline ac: / ri: elements.
     let s = image_re().replace_all(&s, "[image]").into_owned();
@@ -655,6 +753,18 @@ fn convert_children(elem: ElementRef<'_>, out: &mut String, ctx: &mut Ctx) {
 
 fn convert_element(elem: ElementRef<'_>, out: &mut String, ctx: &mut Ctx) {
     let tag = elem.value().name();
+    if !matches!(tag, "script" | "style" | "noscript") {
+        if let Some(id) = elem.value().attr("id") {
+            emit_anchor(id, out);
+        }
+        if tag == "a" {
+            if let Some(name) = elem.value().attr("name") {
+                if elem.value().attr("id") != Some(name) {
+                    emit_anchor(name, out);
+                }
+            }
+        }
+    }
 
     match tag {
         // Block wrappers – check for macro attributes first, then recurse.
@@ -1003,8 +1113,15 @@ fn convert_macro(elem: ElementRef<'_>, name: &str, out: &mut String, ctx: &mut C
 
         // ── Anchor (page anchor — no visible output) ──────────────────────────
         "anchor" => {
-            // Intentionally empty.
+            if let Some(id) = elem.value().attr("data-macro-param-default") {
+                emit_anchor(id, out);
+            }
         }
+
+        // The excerpt body is already present in this page's storage HTML.
+        // Keep it in place, including hidden excerpts, so the CLI exposes the
+        // source content just as it does for other rich-text containers.
+        "excerpt" => convert_children(elem, out, ctx),
 
         // ── Cross-page excerpt include ────────────────────────────────────────
         // We can only fetch the current page; cross-page inclusion is not
@@ -1214,6 +1331,119 @@ mod tests {
     fn test_strong() {
         let md = html_to_markdown("<p><strong>bold</strong></p>", 50_000, None);
         assert!(md.contains("**bold**"));
+    }
+
+    #[test]
+    fn confluence_link_labels_are_preserved() {
+        for (html, expected) in [
+            (
+                r#"<p>前<ac:link><ri:page ri:content-title="Target"/><ac:plain-text-link-body><![CDATA[表示 <文字> & 内容]]></ac:plain-text-link-body></ac:link>後</p>"#,
+                "前表示 <文字> & 内容後",
+            ),
+            (
+                r#"<ac:link><ri:page ri:content-title="Target"/><ac:link-body><strong>表示名</strong></ac:link-body></ac:link>"#,
+                "**表示名**",
+            ),
+            (
+                r#"<ac:link><ri:attachment ri:filename="file.pdf"/><ac:plain-text-link-body>資料 &amp; 説明</ac:plain-text-link-body></ac:link>"#,
+                "資料 & 説明",
+            ),
+            (
+                r#"<ac:link><ri:page ri:content-title="Page &amp; Title"/></ac:link>"#,
+                "Page & Title",
+            ),
+            (
+                r#"<ac:link ac:anchor="section"><ac:plain-text-link-body><![CDATA[節]]></ac:plain-text-link-body></ac:link>"#,
+                "[節](#section)",
+            ),
+        ] {
+            assert_eq!(html_to_markdown(html, 50_000, None).trim(), expected);
+        }
+    }
+
+    #[test]
+    fn same_page_anchor_link_and_macro_target_survive() {
+        let html = r#"<p><ac:link ac:anchor="詳細 (A)&amp;B"><ac:link-body><strong>詳細へ</strong></ac:link-body></ac:link></p><ac:structured-macro ac:name="anchor"><ac:default-parameter>詳細 (A)&amp;B</ac:default-parameter></ac:structured-macro><p>本文</p>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("[**詳細へ**](#詳細%20%28A%29%26B)"), "{md}");
+        assert!(md.contains(r#"<a id="詳細 (A)&amp;B"></a>"#), "{md}");
+        assert!(md.contains("本文"));
+    }
+
+    #[test]
+    fn self_closing_anchor_links_survive_table_conversion() {
+        let html = r#"<table><tbody><tr><td><ac:link ac:anchor="項目A" /></td><td>型A</td><td><p><br /></p></td></tr><tr><td><ac:link ac:anchor="項目B"/></td><td>型B</td><td><p><br /></p></td></tr></tbody></table>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        let rows: Vec<_> = md.lines().collect();
+        assert_eq!(rows.len(), 2, "{md}");
+        assert!(rows[0].contains("[項目A](#項目A)"), "{md}");
+        assert!(rows[0].contains("型A"), "{md}");
+        assert!(rows[1].contains("[項目B](#項目B)"), "{md}");
+        assert!(rows[1].contains("型B"), "{md}");
+    }
+
+    #[test]
+    fn self_closing_anchor_does_not_consume_following_link() {
+        let html = r#"<p><ac:link ac:anchor="first" /> / <ac:link ac:anchor="second"><ac:plain-text-link-body><![CDATA[Second label]]></ac:plain-text-link-body></ac:link> / <ac:link ac:anchor="third"/></p>"#;
+        assert_eq!(
+            html_to_markdown(html, 50_000, None),
+            "[first](#first) / [Second label](#second) / [third](#third)"
+        );
+    }
+
+    #[test]
+    fn self_closing_anchor_decodes_entities_and_encodes_fragment() {
+        let html = r#"<ac:link ac:anchor="A &amp; B" />"#;
+        assert_eq!(
+            html_to_markdown(html, 50_000, None),
+            "[A & B](#A%20%26%20B)"
+        );
+    }
+
+    #[test]
+    fn fragment_encoding_preserves_unicode_and_escapes_syntax() {
+        assert_eq!(encode_fragment("項目A・補足😀"), "項目A・補足😀");
+        assert_eq!(
+            encode_fragment("項目 (A)　補足"),
+            "項目%20%28A%29%E3%80%80補足"
+        );
+        assert_eq!(encode_fragment("a/b:c?d=e"), "a/b:c?d=e");
+        assert_eq!(encode_fragment("100%&#"), "100%25%26%23");
+        assert_eq!(encode_fragment("\t\n"), "%09%0A");
+        assert_eq!(encode_fragment(r#"[]"<>\"#), "%5B%5D%22%3C%3E%5C");
+    }
+
+    #[test]
+    fn anchor_without_label_uses_anchor_name() {
+        let md = html_to_markdown(r#"<ac:link ac:anchor="section"></ac:link>"#, 50_000, None);
+        assert_eq!(md.trim(), "[section](#section)");
+    }
+
+    #[test]
+    fn html_anchor_targets_survive() {
+        let html = r##"<p><a href="#section">Go</a></p><h2 id="section">Section</h2><a name="legacy"></a><a id="both" name="both"></a>"##;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("[Go](#section)"));
+        assert!(md.contains(r#"<a id="section"></a>"#));
+        assert!(md.contains("## Section"));
+        assert!(md.contains(r#"<a id="legacy"></a>"#));
+        assert_eq!(md.matches(r#"<a id="both"></a>"#).count(), 1);
+    }
+
+    #[test]
+    fn anchor_target_attributes_are_escaped() {
+        let md = html_to_markdown(r#"<a name="a&quot;&lt;&amp;"></a>"#, 50_000, None);
+        assert_eq!(md.trim(), r#"<a id="a&quot;&lt;&amp;"></a>"#);
+    }
+
+    #[test]
+    fn cross_page_anchor_is_not_mistaken_for_local_anchor() {
+        let md = html_to_markdown(
+            r#"<ac:link ac:anchor="section"><ri:page ri:content-title="Other"/><ac:plain-text-link-body><![CDATA[Other section]]></ac:plain-text-link-body></ac:link>"#,
+            50_000,
+            None,
+        );
+        assert_eq!(md.trim(), "Other section");
     }
 
     #[test]
@@ -1545,16 +1775,47 @@ second line]]></ac:plain-text-body>
     // ── Anchor macro ──────────────────────────────────────────────────────────
 
     #[test]
-    fn test_anchor_macro_silent() {
+    fn test_anchor_macro_preserves_target() {
         let html = r#"<p>Before</p><ac:structured-macro ac:name="anchor"><ac:parameter ac:name="default">my-anchor</ac:parameter></ac:structured-macro><p>After</p>"#;
         let md = html_to_markdown(html, 50_000, None);
         assert!(md.contains("Before"), "before text should appear");
         assert!(md.contains("After"), "after text should appear");
-        assert!(!md.contains("my-anchor"), "anchor name should not appear");
+        assert!(md.contains(r#"<a id="my-anchor"></a>"#));
         assert!(!md.contains("[unsupported confluence macro: anchor]"));
     }
 
     // ── Excerpt-include macro ─────────────────────────────────────────────────
+
+    #[test]
+    fn inline_excerpt_keeps_anchor_links_in_paragraph() {
+        let html = r#"<p>前<ac:structured-macro ac:name="excerpt"><ac:parameter ac:name="atlassian-macro-output-type">INLINE</ac:parameter><ac:rich-text-body><ac:link ac:anchor="section"><ac:plain-text-link-body><![CDATA[詳細へ]]></ac:plain-text-link-body></ac:link></ac:rich-text-body></ac:structured-macro>後</p><ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">section</ac:parameter></ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert_eq!(md, "前[詳細へ](#section)後\n<a id=\"section\"></a>");
+        assert!(!preprocess(html).contains(r#"<div class="ac-macro" data-macro-name="excerpt""#));
+    }
+
+    #[test]
+    fn block_excerpt_preserves_links_targets_and_nested_macros() {
+        let html = r#"<ac:structured-macro ac:name="excerpt"><ac:rich-text-body><p><ac:link ac:anchor="section"><ac:link-body><strong>詳細</strong></ac:link-body></ac:link></p><ac:structured-macro ac:name="anchor"><ac:default-parameter>section</ac:default-parameter></ac:structured-macro><ac:structured-macro ac:name="info"><ac:rich-text-body><p>本文</p></ac:rich-text-body></ac:structured-macro></ac:rich-text-body></ac:structured-macro>"#;
+        let md = html_to_markdown(html, 50_000, None);
+        assert!(md.contains("[**詳細**](#section)"), "{md}");
+        assert!(md.contains(r#"<a id="section"></a>"#), "{md}");
+        assert!(md.contains("> **Info:**"), "{md}");
+        assert!(md.contains("本文"), "{md}");
+        assert!(!md.contains("unsupported"), "{md}");
+    }
+
+    #[test]
+    fn excerpt_inside_link_body_keeps_visible_label() {
+        let html = r#"<p><ac:link ac:anchor="section"><ac:link-body><ac:structured-macro ac:name="excerpt"><ac:parameter ac:name="atlassian-macro-output-type">INLINE</ac:parameter><ac:rich-text-body>表示文字</ac:rich-text-body></ac:structured-macro></ac:link-body></ac:link></p>"#;
+        assert_eq!(html_to_markdown(html, 50_000, None), "[表示文字](#section)");
+    }
+
+    #[test]
+    fn hidden_excerpt_keeps_source_content() {
+        let html = r#"<ac:structured-macro ac:name="excerpt"><ac:parameter ac:name="hidden">true</ac:parameter><ac:rich-text-body><p>抜粋本文</p></ac:rich-text-body></ac:structured-macro>"#;
+        assert_eq!(html_to_markdown(html, 50_000, None), "抜粋本文");
+    }
 
     #[test]
     fn test_excerpt_includeplus_placeholder() {

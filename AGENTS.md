@@ -96,7 +96,8 @@ The previous form with `set` or `delete` directly after `token`, including the o
   - `panel` → blockquote with optional title header
   - `status` → inline `[title]` badge (rendered as `<span>` to avoid breaking paragraphs)
   - `toc` → `[TOC]`
-  - `anchor` → silent (no output)
+  - `anchor` → an HTML `<a id="…"></a>` target; same-page `ac:link ac:anchor` links retain their fragment destinations
+  - `excerpt` → renders its local rich-text body (including hidden excerpts); `atlassian-macro-output-type=INLINE` preserves inline placement
   - `excerpt-include` / `excerpt-includeplus` → `> [excerpt from: Page Name]` placeholder (cross-page fetch is out of scope). `run_page` resolves the referenced page's ID via a CQL exact-title search (scoped to `ri:space-key` if present, else the current page's space) and appends it as `(id: 123456)`; falls back silently to title-only on a search miss/error. `markdown::extract_excerpt_refs` + `html_to_markdown_with_excerpt_ids` do the extraction/injection — `html_to_markdown` itself stays a pure, network-free function.
   - `sv-translation` → language-selected expansion (see `--language` flag)
   - All other macros → `[unsupported confluence macro: NAME]`

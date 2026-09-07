@@ -18,7 +18,7 @@ pub enum ConfluenceError {
     HttpError { status: u16, message: String },
 
     #[error(
-        "Unauthorized: check your Confluence token (CONFLUENCE_TOKEN env var or system keyring)"
+        "Unauthorized: Confluence token may be expired, revoked, or invalid; check your Confluence token (CONFLUENCE_TOKEN env var or system keyring)"
     )]
     Unauthorized,
 

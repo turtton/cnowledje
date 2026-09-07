@@ -51,7 +51,12 @@ impl ConfluenceClient {
     }
 
     fn api_url(&self, path: &str) -> Result<Url, ConfluenceError> {
-        let full = format!("{}{}{}", self.base_url, self.api_path, path);
+        let full = format!(
+            "{}{}{}",
+            self.base_url.as_str().trim_end_matches('/'),
+            self.api_path,
+            path
+        );
         Ok(Url::parse(&full)?)
     }
 
@@ -85,6 +90,20 @@ impl ConfluenceClient {
             .send()
             .await?;
 
+        // Confluence can hide restricted pages with 404 when an invalid token
+        // causes the request to be treated as anonymous.
+        if response.status() == StatusCode::NOT_FOUND {
+            let current = self
+                .client
+                .get(self.api_url("/user/current")?)
+                .send()
+                .await?;
+            let user: serde_json::Value =
+                handle_response(current, ConfluenceError::Unauthorized).await?;
+            if user.get("type").and_then(|value| value.as_str()) == Some("anonymous") {
+                return Err(ConfluenceError::Unauthorized);
+            }
+        }
         handle_response(response, ConfluenceError::Unauthorized).await
     }
 }
@@ -110,5 +129,93 @@ pub(crate) async fn handle_response<T: serde::de::DeserializeOwned>(
                 message: body,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn page_error(responses: Vec<(u16, &'static str)>) -> ConfluenceError {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (index, (status, body)) in responses.into_iter().enumerate() {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let byte = stream.read_u8().await.unwrap();
+                    request.push(byte);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(request).unwrap();
+                let path = if index == 0 {
+                    "/rest/api/content/123?"
+                } else {
+                    "/rest/api/user/current "
+                };
+                assert!(request.starts_with(&format!("GET {path}")));
+                assert!(request
+                    .to_lowercase()
+                    .contains("authorization: bearer test-token"));
+                let response = format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client =
+            ConfluenceClient::new(&format!("http://{address}"), "/rest/api", "test-token").unwrap();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), client.get_page("123"))
+            .await
+            .unwrap()
+            .unwrap_err();
+        server.await.unwrap();
+        error
+    }
+
+    #[tokio::test]
+    async fn missing_page_with_anonymous_token_is_unauthorized() {
+        let error = page_error(vec![(404, "{}"), (200, r#"{"type":"anonymous"}"#)]).await;
+        assert!(matches!(error, ConfluenceError::Unauthorized));
+        assert_eq!(error.kind(), "unauthorized");
+        assert!(error.to_string().contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn missing_page_with_rejected_token_is_unauthorized() {
+        assert!(matches!(
+            page_error(vec![(404, "{}"), (401, "{}")]).await,
+            ConfluenceError::Unauthorized
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_page_with_authenticated_user_stays_not_found() {
+        assert!(matches!(
+            page_error(vec![(404, "{}"), (200, r#"{"type":"known"}"#)]).await,
+            ConfluenceError::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_authentication_errors_are_preserved() {
+        assert!(matches!(
+            page_error(vec![(401, "{}")]).await,
+            ConfluenceError::Unauthorized
+        ));
+        assert!(matches!(
+            page_error(vec![(403, "{}")]).await,
+            ConfluenceError::Forbidden
+        ));
+    }
+
+    #[tokio::test]
+    async fn authentication_probe_failure_is_not_reported_as_missing_page() {
+        assert!(matches!(
+            page_error(vec![(404, "{}"), (500, "{}")]).await,
+            ConfluenceError::HttpError { status: 500, .. }
+        ));
     }
 }
