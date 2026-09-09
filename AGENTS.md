@@ -96,6 +96,7 @@ The previous form with `set` or `delete` directly after `token`, including the o
   - `panel` → blockquote with optional title header
   - `status` → inline `[title]` badge (rendered as `<span>` to avoid breaking paragraphs)
   - `toc` → `[TOC]`
+  - `pagetree` → root title/ID reference resolved by `navigation::resolve_page_trees` (`@self`, `@parent`, `@home`/omitted, named roots); `@none` refers to all pages in the selected space. Failures remain explicit unresolved references; no commands or child lists are inserted into page content. Pure Markdown conversion without page context retains the configuration placeholder. Root identities are keyed to avoid shifts across skipped translations; duplicate identities are resolved once.
   - `anchor` → an HTML `<a id="…"></a>` target; same-page `ac:link ac:anchor` links retain their fragment destinations
   - `excerpt` → renders its local rich-text body (including hidden excerpts); `atlassian-macro-output-type=INLINE` preserves inline placement
   - `excerpt-include` / `excerpt-includeplus` → `> [excerpt from: Page Name]` placeholder (cross-page fetch is out of scope). `run_page` resolves the referenced page's ID via a CQL exact-title search (scoped to `ri:space-key` if present, else the current page's space) and appends it as `(id: 123456)`; falls back silently to title-only on a search miss/error. `markdown::extract_excerpt_refs` + `html_to_markdown_with_excerpt_ids` do the extraction/injection — `html_to_markdown` itself stays a pure, network-free function.
@@ -135,3 +136,10 @@ To run a single test: `cargo test <test_fn_name>`
 ## Intentionally out of scope
 
 Do not add: raw CQL input, raw JQL input, write operations (POST/PUT/PATCH/DELETE), CQL `OR` for `both` mode (uses two separate queries by design), MCP server, RAG/embeddings, OAuth/SSO, attachment upload/delete.
+
+## Page navigation
+
+- `children <ID-or-URL> [--start N] [--limit N] [--json] [--profile NAME]` lists direct children using GET `/content/<id>/child/page`, with `children.page` expanded for `has_children` (null if absent).
+- `children --space KEY` lists all current pages via GET `/content?spaceKey=...&type=page&status=current`; enforces `allowed_spaces`. ID-based listing uses token permissions, like `page`.
+- Limits are positive and capped by `max_limit`; pagination is manual through `next_start` and `--start`. API next links supply offsets only and are never followed with credentials.
+- `page` expands `ancestors`; root resolution may GET a space homepage or exact-title search but never fetches child lists. `src/navigation.rs` owns resolution and navigation output. Lists use API order, not macro sort/depth/excerpt settings.

@@ -7,6 +7,7 @@
 use regex::Regex;
 use scraper::node::Node;
 use scraper::{ElementRef, Html, Selector};
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 // ── Regex helpers (compiled once) ─────────────────────────────────────────────
@@ -438,6 +439,27 @@ fn rewrite_macros(html: &str) -> String {
                     for (k, v) in &params {
                         tag.push_str(&format!(r#" data-macro-param-{k}="{v}""#));
                     }
+                    // Retain a cross-space root reference before parameter
+                    // cleanup discards the ri:page attributes.
+                    if macro_name == "pagetree" {
+                        for param in
+                            ac_param_with_content_re().find_iter(&html[tag_end..after_params])
+                        {
+                            let raw = param.as_str();
+                            let opening = raw.split('>').next().unwrap_or("");
+                            if ac_param_name_re()
+                                .captures(opening)
+                                .is_some_and(|caps| &caps[1] == "root")
+                            {
+                                if let Some(space) = ri_space_key_attr_re().captures(raw) {
+                                    tag.push_str(&format!(
+                                        r#" data-macro-param-root-space="{}""#,
+                                        escape_attr_preserving_entities(&space[1])
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     tag.push('>');
                     out.push_str(&tag);
                     stack.push(kind);
@@ -583,6 +605,7 @@ struct Ctx {
     /// one per occurrence in document order (see [`extract_excerpt_refs`]).
     excerpt_ids: Vec<Option<String>>,
     excerpt_index: usize,
+    page_trees: HashMap<PageTreeRef, String>,
 }
 
 impl Ctx {
@@ -593,6 +616,7 @@ impl Ctx {
             sv_translation_seen: false,
             excerpt_ids,
             excerpt_index: 0,
+            page_trees: HashMap::new(),
         }
     }
 
@@ -679,6 +703,35 @@ pub fn extract_excerpt_refs(html: &str) -> Vec<ExcerptRef> {
     refs
 }
 
+/// Root identity after storage-format parameter normalization.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PageTreeRef {
+    pub root: String,
+    pub space_key: Option<String>,
+}
+
+fn page_tree_ref(elem: ElementRef<'_>) -> PageTreeRef {
+    let attr = |name| {
+        elem.value()
+            .attr(name)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    PageTreeRef {
+        root: attr("data-macro-param-root").unwrap_or("@home").to_owned(),
+        space_key: attr("data-macro-param-root-space")
+            .or_else(|| attr("data-macro-param-spacekey"))
+            .map(str::to_owned),
+    }
+}
+
+/// Uses the same preprocessing as conversion, excluding literal code blocks.
+pub fn extract_page_tree_refs(html: &str) -> Vec<PageTreeRef> {
+    let document = Html::parse_fragment(&preprocess(html));
+    let selector = Selector::parse(".ac-macro[data-macro-name=pagetree]").unwrap();
+    document.select(&selector).map(page_tree_ref).collect()
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub fn html_to_markdown(html: &str, max_chars: usize, language: Option<&str>) -> String {
@@ -695,6 +748,18 @@ pub fn html_to_markdown_with_excerpt_ids(
     language: Option<&str>,
     excerpt_ids: &[Option<String>],
 ) -> String {
+    html_to_markdown_with_references(html, max_chars, language, excerpt_ids, &HashMap::new())
+}
+
+/// Convert with resolved page-tree descriptions, keyed by root identity so
+/// skipped translations cannot shift references belonging to later macros.
+pub fn html_to_markdown_with_references(
+    html: &str,
+    max_chars: usize,
+    language: Option<&str>,
+    excerpt_ids: &[Option<String>],
+    page_trees: &HashMap<PageTreeRef, String>,
+) -> String {
     let processed = preprocess(html);
     let document = Html::parse_fragment(&processed);
 
@@ -705,6 +770,7 @@ pub fn html_to_markdown_with_excerpt_ids(
 
     let mut out = String::new();
     let mut ctx = Ctx::new(language, excerpt_ids.to_vec());
+    ctx.page_trees = page_trees.clone();
     convert_children(root, &mut out, &mut ctx);
 
     let trimmed = collapse_blank_lines(out.trim());
@@ -1109,6 +1175,37 @@ fn convert_macro(elem: ElementRef<'_>, name: &str, out: &mut String, ctx: &mut C
         // ── Table of contents ─────────────────────────────────────────────────
         "toc" => {
             out.push_str("\n[TOC]\n");
+        }
+
+        // Storage HTML contains only configuration, not the dynamic tree.
+        "pagetree" => {
+            if let Some(description) = ctx.page_trees.get(&page_tree_ref(elem)) {
+                out.push('\n');
+                quote_lines(description, out);
+                return;
+            }
+            let root = elem
+                .value()
+                .attr("data-macro-param-root")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("@home");
+            let mut params: Vec<_> = elem
+                .value()
+                .attrs()
+                .filter_map(|(key, value)| {
+                    key.strip_prefix("data-macro-param-")
+                        .filter(|key| *key != "root")
+                        .map(|key| (key, value))
+                })
+                .collect();
+            params.sort_unstable_by_key(|(key, _)| *key);
+            let mut placeholder = format!("[page tree: root: {}", root);
+            for (key, value) in params {
+                placeholder.push_str(&format!(", {}: {}", key, value));
+            }
+            placeholder.push(']');
+            out.push('\n');
+            quote_lines(&placeholder, out);
         }
 
         // ── Anchor (page anchor — no visible output) ──────────────────────────

@@ -5,7 +5,7 @@ use reqwest::{
 use url::Url;
 
 use crate::error::ConfluenceError;
-use crate::models::{PageResponse, SearchResponse};
+use crate::models::{PageListResponse, PageResponse, SearchResponse, SpaceWithHomepage};
 
 /// Build a `reqwest::Client` with the Bearer auth header set for `token`.
 ///
@@ -77,6 +77,71 @@ impl ConfluenceClient {
         handle_response(response, ConfluenceError::Unauthorized).await
     }
 
+    /// Retrieve direct children only; pagination is controlled by the caller.
+    pub async fn get_children(
+        &self,
+        id: &str,
+        start: u32,
+        limit: u32,
+    ) -> Result<PageListResponse, ConfluenceError> {
+        let id = crate::cql::extract_page_id(id)?;
+        self.list_pages(
+            self.api_url(&format!("/content/{id}/child/page"))?,
+            start,
+            limit,
+        )
+        .await
+    }
+
+    /// All current pages in a space, including its homepage and orphaned pages.
+    pub async fn get_space_pages(
+        &self,
+        space: &str,
+        start: u32,
+        limit: u32,
+    ) -> Result<PageListResponse, ConfluenceError> {
+        let mut url = self.api_url("/content")?;
+        url.query_pairs_mut()
+            .append_pair("spaceKey", space)
+            .append_pair("type", "page")
+            .append_pair("status", "current");
+        self.list_pages(url, start, limit).await
+    }
+
+    async fn list_pages(
+        &self,
+        url: Url,
+        start: u32,
+        limit: u32,
+    ) -> Result<PageListResponse, ConfluenceError> {
+        let response = self
+            .client
+            .get(url)
+            .query(&[
+                ("start", start.to_string()),
+                ("limit", limit.to_string()),
+                ("expand", "children.page,_links".to_string()),
+            ])
+            .send()
+            .await?;
+        handle_response(response, ConfluenceError::Unauthorized).await
+    }
+
+    pub async fn get_homepage(&self, space: &str) -> Result<SpaceWithHomepage, ConfluenceError> {
+        let mut url = self.api_url("/space/")?;
+        url.path_segments_mut()
+            .map_err(|_| ConfluenceError::ConfigError("invalid base URL".into()))?
+            .pop_if_empty()
+            .push(space);
+        let response = self
+            .client
+            .get(url)
+            .query(&[("expand", "homepage")])
+            .send()
+            .await?;
+        handle_response(response, ConfluenceError::Unauthorized).await
+    }
+
     /// Retrieve a single page by numeric ID.
     pub async fn get_page(&self, id: &str) -> Result<PageResponse, ConfluenceError> {
         let url = self.api_url(&format!("/content/{}", id))?;
@@ -85,7 +150,7 @@ impl ConfluenceClient {
             .get(url)
             .query(&[(
                 "expand",
-                "space,version,body.storage,metadata.labels,_links",
+                "space,version,body.storage,metadata.labels,ancestors,_links",
             )])
             .send()
             .await?;

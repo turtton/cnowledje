@@ -87,7 +87,7 @@ EXAMPLES:
   cnowledje page \"https://confluence.example.local/pages/viewpage.action?pageId=123456789\"
 
 NOTES:
-  * Markdown output always includes the title and URL as HTML comments;
+  * Page-tree references identify a root page; use children <ID> to list its\n    direct children. Space-wide trees use children --space <KEY>.\n  * Markdown output always includes the title and URL as HTML comments;
     the last-modified date is included only when available.
   * Markdown output includes a Labels comment line when the page has labels.
   * --max-chars is bounded by the configured max_page_chars; the smaller
@@ -117,6 +117,8 @@ pub enum Commands {
     Search(SearchArgs),
     /// Retrieve a Confluence page by ID or URL.
     Page(PageArgs),
+    /// List direct child pages, or all pages in a space.
+    Children(ChildrenArgs),
     /// Retrieve a Jira issue by key or URL (includes comments).
     Issue(IssueArgs),
     /// Validate and display the current configuration.
@@ -629,5 +631,65 @@ mod tests {
         ));
 
         assert!(Cli::try_parse_from(["cnowledje", "config", "init", "--force"]).is_err());
+    }
+}
+
+#[derive(Args)]
+#[command(
+    after_long_help = "EXAMPLES:\n  cnowledje children 123456 --json\n  cnowledje children 123456 --start 10 --limit 10\n  cnowledje children --space DEV --json\n\nNOTES:\n  Lists direct children only; use a result ID with children to explore deeper,\n  or page to read its content. --space lists all current pages in that space\n  (including homepage and orphaned pages), for a pagetree with root @none.\n  Use next_start as --start to get the next batch; keep --profile and target.\n  has_children is null when the server omits child metadata. Results use API\n  order, not pagetree display settings. Page-ID access uses token permissions;\n  --space enforces allowed_spaces. No child page bodies are fetched."
+)]
+pub struct ChildrenArgs {
+    /// Parent page ID or URL (mutually exclusive with --space).
+    #[arg(required_unless_present = "space", conflicts_with = "space")]
+    pub page_id_or_url: Option<String>,
+    /// List all pages in this space instead of a parent's direct children.
+    #[arg(long)]
+    pub space: Option<String>,
+    /// Starting offset. Use next_start from the preceding response.
+    #[arg(long, default_value_t = 0)]
+    pub start: u32,
+    /// Maximum results in this batch, capped by configured max_limit.
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..))]
+    pub limit: u32,
+    #[arg(long)]
+    pub json: bool,
+    #[arg(long)]
+    pub profile: Option<String>,
+}
+
+#[cfg(test)]
+mod children_tests {
+    use super::*;
+
+    #[test]
+    fn children_requires_exactly_one_target_and_positive_limit() {
+        for args in [
+            vec!["cnowledje", "children"],
+            vec!["cnowledje", "children", "1", "--space", "DEV"],
+            vec!["cnowledje", "children", "1", "--limit", "0"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let cli = Cli::try_parse_from([
+            "cnowledje",
+            "children",
+            "123",
+            "--start",
+            "20",
+            "--limit",
+            "5",
+            "--json",
+            "--profile",
+            "staging",
+        ])
+        .unwrap();
+        let Commands::Children(args) = cli.command else {
+            panic!()
+        };
+        assert_eq!(args.start, 20);
+        assert_eq!(args.limit, 5);
+        assert!(args.json);
+        assert_eq!(args.profile.as_deref(), Some("staging"));
+        assert!(Cli::try_parse_from(["cnowledje", "children", "--space", "DEV"]).is_ok());
     }
 }

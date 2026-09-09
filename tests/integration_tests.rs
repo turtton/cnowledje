@@ -1316,3 +1316,56 @@ fn jira_issue_output_serializes_confluence_references_with_expected_shape() {
         ])
     );
 }
+
+#[test]
+fn pagetree_placeholder_defaults_and_special_roots() {
+    for html in [
+        r#"<ac:structured-macro ac:name="pagetree"/>"#,
+        r#"<ac:structured-macro ac:name="pagetree"></ac:structured-macro>"#,
+        r#"<ac:structured-macro ac:name="pagetree"><ac:parameter ac:name="root"> </ac:parameter></ac:structured-macro>"#,
+    ] {
+        assert_eq!(
+            markdown::html_to_markdown(html, 50_000, None),
+            "> [page tree: root: @home]"
+        );
+    }
+    for root in ["@home", "@self", "@parent", "@none", "設計書"] {
+        let html = format!(
+            r#"<ac:structured-macro ac:name="pagetree"><ac:parameter ac:name="root">{root}</ac:parameter></ac:structured-macro>"#
+        );
+        assert_eq!(
+            markdown::html_to_markdown(&html, 50_000, None),
+            format!("> [page tree: root: {root}]")
+        );
+    }
+}
+
+#[test]
+fn pagetree_placeholder_preserves_reference_and_configuration() {
+    let html = r#"<ac:structured-macro ac:name="pagetree">
+        <ac:parameter ac:name="root"><ac:link><ri:page ri:space-key="DEV" ri:content-title="設計 &amp; 運用"/></ac:link></ac:parameter>
+        <ac:parameter ac:name="startDepth">3</ac:parameter>
+        <ac:parameter ac:name="sort">natural</ac:parameter>
+        <ac:parameter ac:name="reverse">true</ac:parameter>
+        <ac:parameter ac:name="spaceKey">DEV</ac:parameter>
+    </ac:structured-macro>"#;
+    assert_eq!(markdown::html_to_markdown(html, 50_000, None), "> [page tree: root: 設計 & 運用, reverse: true, root-space: DEV, sort: natural, spacekey: DEV, startdepth: 3]");
+}
+
+#[test]
+fn pagetree_nested_placeholder_preserves_surroundings_and_char_budget() {
+    let html = r#"<p>Before</p><ac:structured-macro ac:name="expand"><ac:rich-text-body><ac:structured-macro ac:name="pagetree"/><p>After</p></ac:rich-text-body></ac:structured-macro>"#;
+    let md = markdown::html_to_markdown(html, 50_000, None);
+    assert!(md.contains("Before"));
+    assert!(md.contains("> [page tree: root: @home]"));
+    assert!(md.contains("After"));
+    assert!(md.contains("</details>"));
+    assert!(!md.contains("unsupported"));
+    assert_eq!(
+        markdown::html_to_markdown(html, 12, None),
+        format!(
+            "{}\n\n[content truncated]",
+            md.chars().take(12).collect::<String>()
+        )
+    );
+}

@@ -61,6 +61,20 @@ async fn main() {
                 }
             }
         }
+        Commands::Children(args) => {
+            let json = args.json;
+            match run_children(args).await {
+                Ok(()) => 0,
+                Err(e) => {
+                    if json {
+                        print_error_json(&e);
+                    } else {
+                        eprintln!("error: {}", e);
+                    }
+                    1
+                }
+            }
+        }
         Commands::Page(args) => {
             let json = args.json || args.format == PageFormat::Json;
             match run_page(args).await {
@@ -488,6 +502,72 @@ async fn search_confluence(
 
 // ── page command ──────────────────────────────────────────────────────────────
 
+async fn run_children(args: cli::ChildrenArgs) -> Result<(), ConfluenceError> {
+    let config = load_config(args.profile.as_deref())?;
+    let limit = args.limit.min(config.max_limit);
+    if limit == 0 {
+        return Err(ConfluenceError::InvalidArguments(
+            "max_limit must be greater than zero".into(),
+        ));
+    }
+    let client = ConfluenceClient::new(&config.base_url, &config.api_path, &config.token)?;
+    let parent_id = args
+        .page_id_or_url
+        .as_deref()
+        .map(extract_page_id)
+        .transpose()?;
+    let response = if let Some(id) = &parent_id {
+        client.get_children(id, args.start, limit).await?
+    } else if let Some(space) = &args.space {
+        validate_spaces(std::slice::from_ref(space), &config)?;
+        client.get_space_pages(space, args.start, limit).await?
+    } else {
+        return Err(ConfluenceError::InvalidArguments(
+            "provide a page ID or --space".into(),
+        ));
+    };
+    let output =
+        cnowledje::navigation::children_output(&config.base_url, parent_id, args.space, response);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!(
+            "Confluence pages ({}: {}, start: {}, returned: {})",
+            if output.parent_id.is_some() {
+                "parent"
+            } else {
+                "space"
+            },
+            output
+                .parent_id
+                .as_deref()
+                .or(output.space_key.as_deref())
+                .unwrap_or(""),
+            output.start,
+            output.returned
+        );
+        for page in &output.results {
+            let children = match page.has_children {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "unknown",
+            };
+            println!(
+                "- {} (id: {}, children: {})\n  {}",
+                page.title, page.id, children, page.url
+            );
+        }
+        if output.returned == 0 {
+            println!("(no pages)");
+        }
+        println!("has_more: {}", output.has_more);
+        if let Some(start) = output.next_start {
+            println!("next_start: {}", start);
+        }
+    }
+    Ok(())
+}
+
 async fn run_page(args: cli::PageArgs) -> Result<(), ConfluenceError> {
     let config = load_config(args.profile.as_deref())?;
     let page_id = extract_page_id(&args.page_id_or_url)?;
@@ -567,11 +647,13 @@ async fn run_page(args: cli::PageArgs) -> Result<(), ConfluenceError> {
         })
         .collect();
 
-    let content_markdown = markdown::html_to_markdown_with_excerpt_ids(
+    let page_trees = cnowledje::navigation::resolve_page_trees(&client, &page, html).await;
+    let content_markdown = markdown::html_to_markdown_with_references(
         html,
         effective_max,
         args.language.as_deref(),
         &excerpt_ids,
+        &page_trees,
     );
 
     let output = PageOutput {

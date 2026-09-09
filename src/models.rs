@@ -47,6 +47,8 @@ pub struct ResponseLinks {
 
 #[derive(Debug, Deserialize)]
 pub struct PageResponse {
+    #[serde(default)]
+    pub ancestors: Vec<PageReference>,
     pub id: String,
     pub title: String,
     pub space: Space,
@@ -318,4 +320,67 @@ pub struct JiraCommentOutput {
     pub author: Option<String>,
     pub created: Option<String>,
     pub body_markdown: String,
+}
+
+/// Minimal reference returned by ancestor and homepage expansions.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PageReference {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SpaceWithHomepage {
+    pub homepage: Option<PageReference>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PageListResponse {
+    pub results: Vec<ListedPage>,
+    pub start: u32,
+    pub size: u32,
+    #[serde(rename = "_links")]
+    pub links: Option<ResponseLinks>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListedPage {
+    pub id: String,
+    pub title: String,
+    #[serde(rename = "_links", default)]
+    pub links: ResultLinks,
+    #[serde(default)]
+    pub children: Option<ChildPages>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChildPages {
+    pub page: Option<ChildPageSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChildPageSummary {
+    pub size: u32,
+    #[serde(rename = "_links")]
+    pub links: Option<ResponseLinks>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChildrenOutput {
+    pub parent_id: Option<String>,
+    pub space_key: Option<String>,
+    pub start: u32,
+    pub returned: usize,
+    pub has_more: bool,
+    pub next_start: Option<u32>,
+    pub results: Vec<ChildPageOutput>,
+    pub notice: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChildPageOutput {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub has_children: Option<bool>,
 }

@@ -339,6 +339,20 @@ cnowledje page 123456789 --language ja
 cnowledje page 123456789 --language en
 ```
 
+The `pagetree` macro renders a reference such as `[ページツリー: 「Development Guide」の配下（ルートページID: 123456）]`, identifying the root title and ID. `@self` resolves to the current page, `@parent` to its parent, `@home` (also the default) to the space homepage, and named roots through an exact-title search in the selected space. `@none` identifies the whole space. Missing or failed lookups are explicitly marked unresolved. No command instructions are inserted into page content, and child lists are not fetched automatically.
+
+### Child pages
+
+```sh
+cnowledje children 123456 --json
+cnowledje children 123456 --start 10 --limit 10
+cnowledje children --space DEV --json
+```
+
+`children <ID-or-URL>` lists direct children with title, ID, URL, and `has_children`. Read a result with `page <ID>` or explore deeper with `children <ID>`. `--space <KEY>` lists all current pages in that space, including its homepage and orphaned pages, for `@none` references. Page-ID access uses token permissions; space listing additionally enforces `allowed_spaces`.
+
+`--limit` defaults to 10 and is capped by `max_limit`. Pass `next_start` as `--start` with the same target and profile to fetch the next batch. JSON contains `parent_id`, `space_key`, `start`, `returned`, `has_more`, `next_start`, `results`, and `notice`. `has_children` is `null` (human output: `unknown`) if the server omits child metadata. Lists use API order and do not reproduce macro sorting, expansion depth, or excerpts.
+
 ### Issue
 
 ```bash

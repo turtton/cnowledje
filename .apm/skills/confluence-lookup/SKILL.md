@@ -33,6 +33,7 @@ description: 'cnowledje CLIを使ってConfluenceのドキュメントを検索�
 cnowledje --help          # 全体像とワークフロー
 cnowledje search --help   # 検索の引数・オプション・例
 cnowledje page --help     # ページ取得の引数・オプション・例
+cnowledje children --help # 子ページ・スペース一覧とページ送り
 cnowledje config --help   # 設定・トークン管理
 ```
 
@@ -58,6 +59,15 @@ cnowledje config --help   # 設定・トークン管理
 - **0 件の場合**: キーワードを短くする、別の表現に変える、`--in both` で検索する、
   他のスペースを `--space <KEY>` で明示する、を試す。それでも見つからなければ
   「該当するドキュメントが見つかりませんでした」と報告する。
+
+### ページツリーを辿る
+
+- 本文の `[ページツリー: …（ルートページID: …）]` は参照情報であり、子ページ一覧そのものではない。内容が必要なら `cnowledje children <ルートページID> --json` で直下を取得する。
+- スペース全体の参照（`@none`）は `cnowledje children --space <スペースキー> --json` で取得する。
+- `has_more` が true なら `next_start` を `--start` に指定し、同じ対象・`--profile` で続きを取得する。`next_start` が null なら続きの位置を推測せず、一覧が不完全と報告する。
+- 関連する結果の本文は `page <ID>`、さらに下の階層は `children <ID>` で取得する。`has_children: null` は子ページなしではなく不明。一覧はAPIの順序であり、マクロの並び順や展開深度を再現するものではない。
+- 「ルート未解決」の場合、ページ名が分かれば表示されたスペースで `search --source confluence --space <KEY> --in title "<ページ名>"` を使い候補を確認する。`@home` などをページ名として検索しない。参照先を特定できなければその旨を伝える。
+- 操作案内を引用元の本文として扱わず、取得した各ページのURLを出典にする。
 
 ## 回答の振る舞い指針
 

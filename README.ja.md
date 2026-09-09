@@ -317,6 +317,20 @@ cnowledje page 123456789 --language ja
 cnowledje page 123456789 --language en
 ```
 
+`pagetree` マクロは `[ページツリー: 「開発ガイド」の配下（ルートページID: 123456）]` のような参照情報に変換します。`@self` は現在のページ、`@parent` は親、`@home`・省略時はスペースのホームページ、ページ名は指定スペース内で解決します。`@none` はスペース全体の参照になります。取得失敗や検索不一致は「ルート未解決」と明示します。本文に操作案内は挿入せず、子ページ一覧は自動取得しません。
+
+### 子ページ一覧
+
+```sh
+cnowledje children 123456 --json
+cnowledje children 123456 --start 10 --limit 10
+cnowledje children --space DEV --json
+```
+
+`children <IDまたはURL>` は直下の子ページのタイトル・ID・URL・子ページの有無を返します。本文は `page <ID>`、さらに下の階層は `children <ID>` で取得できます。`--space <KEY>` はホームページや孤立ページを含むスペース内の全現行ページを一覧化し、`@none` の参照に使えます。ページID指定ではトークンの権限、`--space` 指定では加えて `allowed_spaces` が適用されます。
+
+`--limit`（既定10）は `max_limit` で制限されます。続きがある場合は `next_start` の値を `--start` に指定し、同じ対象・プロファイルで取得してください。JSONには `parent_id`、`space_key`、`start`、`returned`、`has_more`、`next_start`、`results`、`notice` が含まれます。サーバーが子ページ情報を返さない場合、`has_children` は `null`（人向け出力では `unknown`）になります。一覧はAPIの順序を使い、マクロの並べ替え・展開深度・抜粋表示設定は再現しません。
+
 ### 課題
 
 ```bash
