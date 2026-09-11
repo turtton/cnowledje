@@ -41,7 +41,7 @@ the binary into `~/.local/bin`:
 
 ```bash
 set -euo pipefail
-VERSION=0.1.0
+VERSION=0.2.0
 case "$(uname -m)" in
   arm64)  TARGET=aarch64-apple-darwin ;;
   x86_64) TARGET=x86_64-apple-darwin ;;
@@ -97,13 +97,13 @@ brew upgrade cnowledje
 The flake reads the package version from `Cargo.toml`:
 
 ```bash
-nix profile install github:turtton/cnowledje/v0.1.0
+nix profile install github:turtton/cnowledje/v0.2.0
 ```
 
 ### From source
 
 ```bash
-cargo install --git https://github.com/turtton/cnowledje --tag v0.1.0 --locked
+cargo install --git https://github.com/turtton/cnowledje --tag v0.2.0 --locked
 ```
 
 For local development, `cargo install --path .` remains available.

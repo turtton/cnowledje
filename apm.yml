@@ -1,5 +1,5 @@
 name: cnowledje
-version: 0.1.0
+version: 0.2.0
 description: Read-only Confluence and Jira CLI for Server/Data Center
 author: turtton
 # Which agent platforms to deploy to.
