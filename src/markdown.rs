@@ -606,6 +606,7 @@ struct Ctx {
     excerpt_ids: Vec<Option<String>>,
     excerpt_index: usize,
     page_trees: HashMap<PageTreeRef, String>,
+    mermaid_sources: HashMap<String, String>,
 }
 
 impl Ctx {
@@ -617,6 +618,7 @@ impl Ctx {
             excerpt_ids,
             excerpt_index: 0,
             page_trees: HashMap::new(),
+            mermaid_sources: HashMap::new(),
         }
     }
 
@@ -760,6 +762,42 @@ pub fn html_to_markdown_with_references(
     excerpt_ids: &[Option<String>],
     page_trees: &HashMap<PageTreeRef, String>,
 ) -> String {
+    html_to_markdown_with_page_resources(
+        html,
+        max_chars,
+        language,
+        excerpt_ids,
+        page_trees,
+        &HashMap::new(),
+    )
+}
+
+/// Names of Mermaid source attachments, deduplicated in document order.
+pub fn extract_mermaid_filenames(html: &str) -> Vec<String> {
+    let processed = preprocess(html);
+    let document = Html::parse_fragment(&processed);
+    let selector = Selector::parse(".ac-macro[data-macro-name=mermaid-cloud]").unwrap();
+    let mut names = Vec::new();
+    for elem in document.select(&selector) {
+        if let Some(filename) = elem.value().attr("data-macro-param-filename") {
+            if !filename.trim().is_empty() && !names.iter().any(|name| name == filename) {
+                names.push(filename.to_owned());
+            }
+        }
+    }
+    names
+}
+
+/// Convert with page-tree references and Mermaid sources fetched by the caller.
+/// `revision` versions the rendered SVG, not the source attachment.
+pub fn html_to_markdown_with_page_resources(
+    html: &str,
+    max_chars: usize,
+    language: Option<&str>,
+    excerpt_ids: &[Option<String>],
+    page_trees: &HashMap<PageTreeRef, String>,
+    mermaid_sources: &HashMap<String, String>,
+) -> String {
     let processed = preprocess(html);
     let document = Html::parse_fragment(&processed);
 
@@ -771,6 +809,7 @@ pub fn html_to_markdown_with_references(
     let mut out = String::new();
     let mut ctx = Ctx::new(language, excerpt_ids.to_vec());
     ctx.page_trees = page_trees.clone();
+    ctx.mermaid_sources = mermaid_sources.clone();
     convert_children(root, &mut out, &mut ctx);
 
     let trimmed = collapse_blank_lines(out.trim());
@@ -1120,6 +1159,31 @@ fn convert_macro(elem: ElementRef<'_>, name: &str, out: &mut String, ctx: &mut C
             out.push_str("```\n");
         }
 
+        // ── Mermaid diagram ──────────────────────────────────────────────────
+        "mermaid-cloud" => {
+            let filename = elem.value().attr("data-macro-param-filename").unwrap_or("");
+            // Some exporters embed the definition instead of an attachment.
+            let embedded = elem
+                .select(pre_sel())
+                .next()
+                .map(|p| p.text().collect::<String>());
+            let source = embedded
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| ctx.mermaid_sources.get(filename).map(String::as_str));
+            if let Some(source) = source.filter(|s| !s.trim().is_empty()) {
+                emit_mermaid(source, out);
+            } else {
+                out.push_str("\n> [mermaid diagram: ");
+                out.push_str(&filename.replace(['\r', '\n'], " "));
+                out.push_str(if filename.trim().is_empty() {
+                    "source unavailable; missing filename]\n"
+                } else {
+                    " (source unavailable)]\n"
+                });
+            }
+        }
+
         // ── No-format block ───────────────────────────────────────────────────
         "noformat" => {
             let code = elem
@@ -1314,11 +1378,44 @@ fn convert_table(table: ElementRef<'_>, out: &mut String, ctx: &mut Ctx) {
 
 // ── Utility ───────────────────────────────────────────────────────────────────
 
+fn emit_mermaid(source: &str, out: &mut String) {
+    // An attachment may contain backticks inside labels or comments.
+    let longest_run = source
+        .split(|ch| ch != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(3.max(longest_run + 1));
+    out.push_str(&format!("\n{fence}mermaid\n{source}"));
+    if !source.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("{fence}\n"));
+}
+
 fn collapse_blank_lines(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut blank_count = 0usize;
+    let mut code_fence: Option<usize> = None;
 
     for line in s.lines() {
+        let fence_length = line
+            .trim_start()
+            .chars()
+            .take_while(|ch| *ch == '`')
+            .count();
+        if let Some(length) = code_fence {
+            result.push_str(line);
+            result.push('\n');
+            if fence_length >= length && line.trim().chars().all(|ch| ch == '`') {
+                code_fence = None;
+            }
+            blank_count = 0;
+            continue;
+        }
+        if fence_length >= 3 {
+            code_fence = Some(fence_length);
+        }
         if line.trim().is_empty() {
             blank_count += 1;
             if blank_count <= 1 {

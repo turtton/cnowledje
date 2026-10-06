@@ -648,12 +648,44 @@ async fn run_page(args: cli::PageArgs) -> Result<(), ConfluenceError> {
         .collect();
 
     let page_trees = cnowledje::navigation::resolve_page_trees(&client, &page, html).await;
-    let content_markdown = markdown::html_to_markdown_with_references(
+    let mut mermaid_sources = HashMap::new();
+    for filename in markdown::extract_mermaid_filenames(html) {
+        match client.get_attachment_text(&page.id, &filename).await {
+            Ok(source) if !source.trim().is_empty() => {
+                mermaid_sources.insert(filename, source);
+            }
+            Ok(_) => {
+                tracing::warn!(page_id = %page.id, %filename, "Mermaid source attachment is empty")
+            }
+            Err(error) => {
+                // Report local validation reasons and status codes, never server
+                // response bodies or request details that could contain secrets.
+                let reason = match &error {
+                    ConfluenceError::InvalidArguments(message) => message.as_str(),
+                    ConfluenceError::NotFound(message) => message.as_str(),
+                    ConfluenceError::RequestError(error) if error.is_redirect() => {
+                        "attachment redirect rejected"
+                    }
+                    _ => error.kind(),
+                };
+                let http_status = match &error {
+                    ConfluenceError::HttpError { status, .. } => Some(*status),
+                    ConfluenceError::Unauthorized => Some(401),
+                    ConfluenceError::Forbidden => Some(403),
+                    ConfluenceError::NotFound(_) => Some(404),
+                    _ => None,
+                };
+                tracing::warn!(page_id = %page.id, %filename, reason, http_status, "Mermaid source attachment could not be read");
+            }
+        }
+    }
+    let content_markdown = markdown::html_to_markdown_with_page_resources(
         html,
         effective_max,
         args.language.as_deref(),
         &excerpt_ids,
         &page_trees,
+        &mermaid_sources,
     );
 
     let output = PageOutput {

@@ -46,6 +46,30 @@ pub struct ResponseLinks {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct AttachmentListResponse {
+    pub results: Vec<Attachment>,
+    #[serde(rename = "_links", default)]
+    pub links: AttachmentListLinks,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AttachmentListLinks {
+    pub base: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Attachment {
+    pub title: String,
+    #[serde(rename = "_links", default)]
+    pub links: AttachmentLinks,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AttachmentLinks {
+    pub download: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PageResponse {
     #[serde(default)]
     pub ancestors: Vec<PageReference>,

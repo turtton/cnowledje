@@ -341,6 +341,8 @@ cnowledje page 123456789 --language en
 
 The `pagetree` macro renders a reference such as `[ページツリー: 「Development Guide」の配下（ルートページID: 123456）]`, identifying the root title and ID. `@self` resolves to the current page, `@parent` to its parent, `@home` (also the default) to the space homepage, and named roots through an exact-title search in the selected space. `@none` identifies the whole space. Missing or failed lookups are explicitly marked unresolved. No command instructions are inserted into page content, and child lists are not fetched automatically.
 
+The `mermaid-cloud` macro reads its Mermaid definition from the current page's attachment named by `filename` and emits a fenced `mermaid` code block. It searches GET `/content/<id>/child/attachment?filename=...` through the configured API path, then uses the returned `_links.download` and `_links.base` to resolve the download URL, preserving context paths and query parameters. Links and download redirects must stay on the configured server (same scheme, host, and port). Embedded plain-text bodies are also supported. The macro's `revision` refers to the rendered SVG version; source retrieval uses the latest text attachment. Failed, empty, non-UTF-8, or oversized (over 1 MiB) downloads leave an explicit `source unavailable` reference and a warning on stderr identifying the filename and failure reason or HTTP status (without response bodies or credentials). Conversion without a Confluence client remains network-free, and `--format storage-html` returns the original macro.
+
 ### Child pages
 
 ```sh

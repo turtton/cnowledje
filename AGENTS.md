@@ -92,6 +92,7 @@ The previous form with `set` or `delete` directly after `token`, including the o
 - **Confluence macros** (`ac:structured-macro`) — supported macros are converted as follows:
   - `expand` → `<details open>` with `<summary>▸ title</summary>`, expanded body, and a closing `</details>` boundary
   - `code` / `noformat` → fenced code block (with language for `code`)
+  - `mermaid-cloud` → fenced `mermaid` block from an embedded plain-text body or the current page's text attachment named by `filename`. `run_page` resolves each exact filename once via GET `/content/<id>/child/attachment?filename=...`, using `_links.download` and `_links.base` rather than guessing a download path. Context paths and query parameters are preserved; links and download redirects must stay on the configured origin. `revision` versions the SVG and is not applied to source downloads. Failed/empty/non-UTF-8/oversized (>1 MiB) sources remain explicit `source unavailable` references with stderr diagnostics. Pure conversion stays network-free.
   - `info` / `note` / `warning` / `tip` → `> **Label:**` blockquote
   - `panel` → blockquote with optional title header
   - `status` → inline `[title]` badge (rendered as `<span>` to avoid breaking paragraphs)

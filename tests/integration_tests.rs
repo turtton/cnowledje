@@ -529,6 +529,111 @@ fn markdown_confluence_code_macro() {
 }
 
 #[test]
+fn markdown_mermaid_cloud_resolves_source_attachment() {
+    let html = r#"<p>Before</p><ac:structured-macro ac:name="mermaid-cloud">
+<ac:parameter ac:name="zoom">fit</ac:parameter>
+<ac:parameter ac:name="revision">11</ac:parameter>
+<ac:parameter ac:name="filename">loadtest_v3_4_0_scenario_a_2</ac:parameter>
+<ac:parameter ac:name="format">svg</ac:parameter>
+<ac:parameter ac:name="toolbar">bottom</ac:parameter>
+</ac:structured-macro><p>After</p>"#;
+    let source =
+        "sequenceDiagram\n    participant A as 利用者\n\n\n    A->>A: 実行 <test> & 確認\n";
+    let sources = std::collections::HashMap::from([(
+        "loadtest_v3_4_0_scenario_a_2".to_owned(),
+        source.to_owned(),
+    )]);
+    assert_eq!(
+        markdown::extract_mermaid_filenames(html),
+        ["loadtest_v3_4_0_scenario_a_2"]
+    );
+    let md = markdown::html_to_markdown_with_page_resources(
+        html,
+        50_000,
+        None,
+        &[],
+        &Default::default(),
+        &sources,
+    );
+    assert_eq!(md, format!("Before\n\n```mermaid\n{source}```\n\nAfter"));
+    let truncated = markdown::html_to_markdown_with_page_resources(
+        html,
+        30,
+        None,
+        &[],
+        &Default::default(),
+        &sources,
+    );
+    assert!(truncated.ends_with("[content truncated]"));
+}
+
+#[test]
+fn markdown_mermaid_cloud_unresolved_and_empty_sources_are_explicit() {
+    let html = r#"<ac:structured-macro ac:name="mermaid-cloud"><ac:parameter ac:name="filename">diagram</ac:parameter></ac:structured-macro><p>After</p>"#;
+    let md = markdown::html_to_markdown(html, 50_000, None);
+    assert!(md.contains("[mermaid diagram: diagram (source unavailable)]"));
+    assert!(!md.contains("unsupported confluence macro"));
+    assert!(md.contains("After"));
+    let sources = std::collections::HashMap::from([("diagram".to_owned(), " \n".to_owned())]);
+    assert_eq!(
+        md,
+        markdown::html_to_markdown_with_page_resources(
+            html,
+            50_000,
+            None,
+            &[],
+            &Default::default(),
+            &sources
+        )
+    );
+    let missing = markdown::html_to_markdown(
+        r#"<ac:structured-macro ac:name="mermaid-cloud"/><p>After</p>"#,
+        50_000,
+        None,
+    );
+    assert!(missing.contains("missing filename"));
+    assert!(missing.contains("After"));
+}
+
+#[test]
+fn markdown_mermaid_cloud_embedded_source_is_protected() {
+    let html = r#"<ac:structured-macro ac:name="expand"><ac:rich-text-body><ac:structured-macro ac:name="mermaid-cloud"><ac:plain-text-body><![CDATA[graph TD
+    A["<ac:structured-macro> & 日本語 ```"] --> B]]></ac:plain-text-body></ac:structured-macro></ac:rich-text-body></ac:structured-macro>"#;
+    let md = markdown::html_to_markdown(html, 50_000, None);
+    assert!(
+        md.contains(
+            "````mermaid\ngraph TD\n    A[\"<ac:structured-macro> & 日本語 ```\"] --> B\n````"
+        ),
+        "{md}"
+    );
+    assert!(md.ends_with("</details>"));
+}
+
+#[test]
+fn markdown_mermaid_cloud_uses_filename_identity_across_translations() {
+    let html = r#"<ac:structured-macro ac:name="sv-translation"><ac:parameter ac:name="language">en</ac:parameter><ac:rich-text-body><ac:structured-macro ac:name="mermaid-cloud"><ac:parameter ac:name="filename">English</ac:parameter></ac:structured-macro></ac:rich-text-body></ac:structured-macro>
+<ac:structured-macro ac:name="sv-translation"><ac:parameter ac:name="language">ja</ac:parameter><ac:rich-text-body><ac:structured-macro ac:name="mermaid-cloud"><ac:parameter ac:name="filename">日本語 &amp; 図</ac:parameter></ac:structured-macro><ac:structured-macro ac:name="mermaid-cloud"><ac:parameter ac:name="filename">日本語 &amp; 図</ac:parameter></ac:structured-macro></ac:rich-text-body></ac:structured-macro>"#;
+    assert_eq!(
+        markdown::extract_mermaid_filenames(html),
+        ["English", "日本語 & 図"]
+    );
+    let sources = std::collections::HashMap::from([
+        ("English".to_owned(), "graph TD\nA-->English".to_owned()),
+        ("日本語 & 図".to_owned(), "graph TD\nA-->日本語".to_owned()),
+    ]);
+    let md = markdown::html_to_markdown_with_page_resources(
+        html,
+        50_000,
+        Some("ja"),
+        &[],
+        &Default::default(),
+        &sources,
+    );
+    assert!(!md.contains("English"));
+    assert_eq!(md.matches("A-->日本語").count(), 2);
+}
+
+#[test]
 fn markdown_confluence_expand_macro_has_explicit_boundary() {
     let html = r#"<ac:structured-macro ac:name="expand">
   <ac:parameter ac:name="title">Details</ac:parameter>
