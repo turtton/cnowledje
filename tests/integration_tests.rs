@@ -348,7 +348,7 @@ fn jql_issue_key_invalid_unrelated_url_is_err() {
 
 #[test]
 fn markdown_heading_levels() {
-    let md = markdown::html_to_markdown("<h1>H1</h1><h2>H2</h2><h3>H3</h3>", 50_000, None);
+    let md = markdown::html_to_markdown("<h1>H1</h1><h2>H2</h2><h3>H3</h3>", None);
     assert!(md.contains("# H1"));
     assert!(md.contains("## H2"));
     assert!(md.contains("### H3"));
@@ -356,25 +356,20 @@ fn markdown_heading_levels() {
 
 #[test]
 fn markdown_bold_and_italic() {
-    let md = markdown::html_to_markdown("<strong>bold</strong> and <em>italic</em>", 50_000, None);
+    let md = markdown::html_to_markdown("<strong>bold</strong> and <em>italic</em>", None);
     assert!(md.contains("**bold**"));
     assert!(md.contains("_italic_"));
 }
 
 #[test]
 fn markdown_link_with_href() {
-    let md =
-        markdown::html_to_markdown(r#"<a href="https://example.com">Example</a>"#, 50_000, None);
+    let md = markdown::html_to_markdown(r#"<a href="https://example.com">Example</a>"#, None);
     assert!(md.contains("[Example](https://example.com)"));
 }
 
 #[test]
 fn markdown_unordered_list() {
-    let md = markdown::html_to_markdown(
-        "<ul><li>Alpha</li><li>Beta</li><li>Gamma</li></ul>",
-        50_000,
-        None,
-    );
+    let md = markdown::html_to_markdown("<ul><li>Alpha</li><li>Beta</li><li>Gamma</li></ul>", None);
     assert!(md.contains("- Alpha"));
     assert!(md.contains("- Beta"));
     assert!(md.contains("- Gamma"));
@@ -382,11 +377,8 @@ fn markdown_unordered_list() {
 
 #[test]
 fn markdown_ordered_list() {
-    let md = markdown::html_to_markdown(
-        "<ol><li>First</li><li>Second</li><li>Third</li></ol>",
-        50_000,
-        None,
-    );
+    let md =
+        markdown::html_to_markdown("<ol><li>First</li><li>Second</li><li>Third</li></ol>", None);
     assert!(md.contains("1. First"));
     assert!(md.contains("2. Second"));
     assert!(md.contains("3. Third"));
@@ -394,13 +386,13 @@ fn markdown_ordered_list() {
 
 #[test]
 fn markdown_inline_code() {
-    let md = markdown::html_to_markdown("<code>let x = 42;</code>", 50_000, None);
+    let md = markdown::html_to_markdown("<code>let x = 42;</code>", None);
     assert!(md.contains("`let x = 42;`"));
 }
 
 #[test]
 fn markdown_preformatted_block() {
-    let md = markdown::html_to_markdown("<pre><code>fn main() {}</code></pre>", 50_000, None);
+    let md = markdown::html_to_markdown("<pre><code>fn main() {}</code></pre>", None);
     assert!(md.contains("```"));
     assert!(md.contains("fn main()"));
 }
@@ -412,7 +404,7 @@ fn markdown_table_with_header() {
         <tr><td>foo</td><td>1</td></tr>\
         <tr><td>bar</td><td>2</td></tr>\
         </table>";
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
     assert!(md.contains("| Name | Value |"));
     assert!(md.contains("| --- | --- |"));
     assert!(md.contains("| foo | 1 |"));
@@ -422,7 +414,7 @@ fn markdown_table_with_header() {
 #[test]
 fn markdown_confluence_macro_placeholder() {
     let html = r#"<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">PROJ-1</ac:parameter></ac:structured-macro>"#;
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
     // Parameter values are surfaced in the placeholder so ticket keys remain readable.
     assert!(
         md.contains("[unsupported confluence macro: jira"),
@@ -435,7 +427,7 @@ fn markdown_confluence_macro_placeholder() {
 #[test]
 fn markdown_confluence_info_macro_blockquote() {
     let html = r#"<ac:structured-macro ac:name="info"><ac:rich-text-body><p>Note here</p></ac:rich-text-body></ac:structured-macro>"#;
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
     assert!(
         md.contains("> **Info:**"),
         "Info label should appear: {}",
@@ -446,21 +438,21 @@ fn markdown_confluence_info_macro_blockquote() {
 
 #[test]
 fn markdown_japanese_utf8() {
-    let md = markdown::html_to_markdown("<p>Redisの利用方針について説明します。</p>", 50_000, None);
+    let md = markdown::html_to_markdown("<p>Redisの利用方針について説明します。</p>", None);
     assert!(md.contains("Redisの利用方針について説明します。"));
 }
 
 #[test]
-fn markdown_truncation_adds_notice() {
-    let html = "<p>".to_string() + &"あ".repeat(300) + "</p>";
-    let md = markdown::html_to_markdown(&html, 50, None);
-    assert!(md.contains("[content truncated]"), "got: {}", md);
+fn markdown_preserves_long_unicode_content_and_trailing_blocks() {
+    let body = "あ".repeat(60_000);
+    let html = format!("<p>{body}</p><h2>末尾</h2><pre><code>END</code></pre>");
+    let md = markdown::html_to_markdown(&html, None);
+    assert_eq!(md, format!("{body}\n\n## 末尾\n\n```\nEND\n```"));
 }
 
 #[test]
-fn markdown_no_truncation_when_short() {
-    let md = markdown::html_to_markdown("<p>Short content.</p>", 50_000, None);
-    assert!(!md.contains("[content truncated]"));
+fn markdown_preserves_short_content() {
+    let md = markdown::html_to_markdown("<p>Short content.</p>", None);
     assert!(md.contains("Short content."));
 }
 
@@ -475,7 +467,7 @@ fn markdown_sv_translation_expand_by_language() {
   <ac:parameter ac:name="language">en</ac:parameter>
   <ac:rich-text-body><p>English content</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-    let md = markdown::html_to_markdown(html, 50_000, Some("ja"));
+    let md = markdown::html_to_markdown(html, Some("ja"));
     assert!(
         md.contains("日本語コンテンツ"),
         "ja block should be expanded"
@@ -497,7 +489,7 @@ fn markdown_sv_translation_expand_first_when_no_language() {
   <ac:parameter ac:name="language">en</ac:parameter>
   <ac:rich-text-body><p>English content</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
     assert!(
         md.contains("日本語コンテンツ"),
         "first block should be expanded when language unspecified"
@@ -518,7 +510,7 @@ fn markdown_confluence_code_macro() {
     println!("hello");
 }]]></ac:plain-text-body>
 </ac:structured-macro>"#;
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
     assert!(md.contains("```rust"), "language fence: {}", md);
     assert!(md.contains("fn main()"), "code body: {}", md);
     assert!(
@@ -549,28 +541,18 @@ fn markdown_mermaid_cloud_resolves_source_attachment() {
     );
     let md = markdown::html_to_markdown_with_page_resources(
         html,
-        50_000,
         None,
         &[],
         &Default::default(),
         &sources,
     );
     assert_eq!(md, format!("Before\n\n```mermaid\n{source}```\n\nAfter"));
-    let truncated = markdown::html_to_markdown_with_page_resources(
-        html,
-        30,
-        None,
-        &[],
-        &Default::default(),
-        &sources,
-    );
-    assert!(truncated.ends_with("[content truncated]"));
 }
 
 #[test]
 fn markdown_mermaid_cloud_unresolved_and_empty_sources_are_explicit() {
     let html = r#"<ac:structured-macro ac:name="mermaid-cloud"><ac:parameter ac:name="filename">diagram</ac:parameter></ac:structured-macro><p>After</p>"#;
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
     assert!(md.contains("[mermaid diagram: diagram (source unavailable)]"));
     assert!(!md.contains("unsupported confluence macro"));
     assert!(md.contains("After"));
@@ -579,7 +561,6 @@ fn markdown_mermaid_cloud_unresolved_and_empty_sources_are_explicit() {
         md,
         markdown::html_to_markdown_with_page_resources(
             html,
-            50_000,
             None,
             &[],
             &Default::default(),
@@ -588,7 +569,6 @@ fn markdown_mermaid_cloud_unresolved_and_empty_sources_are_explicit() {
     );
     let missing = markdown::html_to_markdown(
         r#"<ac:structured-macro ac:name="mermaid-cloud"/><p>After</p>"#,
-        50_000,
         None,
     );
     assert!(missing.contains("missing filename"));
@@ -599,7 +579,7 @@ fn markdown_mermaid_cloud_unresolved_and_empty_sources_are_explicit() {
 fn markdown_mermaid_cloud_embedded_source_is_protected() {
     let html = r#"<ac:structured-macro ac:name="expand"><ac:rich-text-body><ac:structured-macro ac:name="mermaid-cloud"><ac:plain-text-body><![CDATA[graph TD
     A["<ac:structured-macro> & 日本語 ```"] --> B]]></ac:plain-text-body></ac:structured-macro></ac:rich-text-body></ac:structured-macro>"#;
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
     assert!(
         md.contains(
             "````mermaid\ngraph TD\n    A[\"<ac:structured-macro> & 日本語 ```\"] --> B\n````"
@@ -623,7 +603,6 @@ fn markdown_mermaid_cloud_uses_filename_identity_across_translations() {
     ]);
     let md = markdown::html_to_markdown_with_page_resources(
         html,
-        50_000,
         Some("ja"),
         &[],
         &Default::default(),
@@ -639,7 +618,7 @@ fn markdown_confluence_expand_macro_has_explicit_boundary() {
   <ac:parameter ac:name="title">Details</ac:parameter>
   <ac:rich-text-body><p>Expanded body content.</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
     assert_eq!(
         md, "<details open>\n<summary>▸ Details</summary>\n\nExpanded body content.\n\n</details>",
         "expand output must delimit the rendered body with an explicit closing tag"
@@ -651,7 +630,7 @@ fn markdown_confluence_expand_macro_default_title_and_empty_body() {
     let html = r#"<ac:structured-macro ac:name="expand">
   <ac:rich-text-body></ac:rich-text-body>
 </ac:structured-macro>"#;
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
     assert_eq!(
         md, "<details open>\n<summary>▸ Expand</summary>\n\n</details>",
         "an empty expand still needs a visible range and the default title"
@@ -672,7 +651,7 @@ fn markdown_confluence_expand_macro_nesting_keeps_body_inside_range() {
   </ac:rich-text-body>
 </ac:structured-macro>
 <p>Outside after.</p>"#;
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
 
     assert_eq!(md.matches("<details open>").count(), 2);
     assert_eq!(md.matches("</details>").count(), 2);
@@ -719,7 +698,7 @@ fn markdown_confluence_expand_macro_nesting_keeps_body_inside_range() {
 #[test]
 fn markdown_confluence_status_inline() {
     let html = r#"<p>Task is <ac:structured-macro ac:name="status"><ac:parameter ac:name="title">IN PROGRESS</ac:parameter></ac:structured-macro> now.</p>"#;
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
     assert!(md.contains("[IN PROGRESS]"), "status badge: {}", md);
     // All text should appear together, not split across separate lines
     let lines: Vec<&str> = md.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -1384,7 +1363,6 @@ fn jira_issue_output_serializes_confluence_references_with_expected_shape() {
         url: "https://jira.example.com/browse/ENG-42".into(),
         description_markdown: "Ready".into(),
         comments: vec![],
-        omitted_comments: 0,
         confluence_references: vec![
             models::ConfluenceReferenceOutput {
                 id: 123,
@@ -1430,7 +1408,7 @@ fn pagetree_placeholder_defaults_and_special_roots() {
         r#"<ac:structured-macro ac:name="pagetree"><ac:parameter ac:name="root"> </ac:parameter></ac:structured-macro>"#,
     ] {
         assert_eq!(
-            markdown::html_to_markdown(html, 50_000, None),
+            markdown::html_to_markdown(html, None),
             "> [page tree: root: @home]"
         );
     }
@@ -1439,7 +1417,7 @@ fn pagetree_placeholder_defaults_and_special_roots() {
             r#"<ac:structured-macro ac:name="pagetree"><ac:parameter ac:name="root">{root}</ac:parameter></ac:structured-macro>"#
         );
         assert_eq!(
-            markdown::html_to_markdown(&html, 50_000, None),
+            markdown::html_to_markdown(&html, None),
             format!("> [page tree: root: {root}]")
         );
     }
@@ -1454,23 +1432,16 @@ fn pagetree_placeholder_preserves_reference_and_configuration() {
         <ac:parameter ac:name="reverse">true</ac:parameter>
         <ac:parameter ac:name="spaceKey">DEV</ac:parameter>
     </ac:structured-macro>"#;
-    assert_eq!(markdown::html_to_markdown(html, 50_000, None), "> [page tree: root: 設計 & 運用, reverse: true, root-space: DEV, sort: natural, spacekey: DEV, startdepth: 3]");
+    assert_eq!(markdown::html_to_markdown(html, None), "> [page tree: root: 設計 & 運用, reverse: true, root-space: DEV, sort: natural, spacekey: DEV, startdepth: 3]");
 }
 
 #[test]
-fn pagetree_nested_placeholder_preserves_surroundings_and_char_budget() {
+fn pagetree_nested_placeholder_preserves_surroundings() {
     let html = r#"<p>Before</p><ac:structured-macro ac:name="expand"><ac:rich-text-body><ac:structured-macro ac:name="pagetree"/><p>After</p></ac:rich-text-body></ac:structured-macro>"#;
-    let md = markdown::html_to_markdown(html, 50_000, None);
+    let md = markdown::html_to_markdown(html, None);
     assert!(md.contains("Before"));
     assert!(md.contains("> [page tree: root: @home]"));
     assert!(md.contains("After"));
     assert!(md.contains("</details>"));
     assert!(!md.contains("unsupported"));
-    assert_eq!(
-        markdown::html_to_markdown(html, 12, None),
-        format!(
-            "{}\n\n[content truncated]",
-            md.chars().take(12).collect::<String>()
-        )
-    );
 }

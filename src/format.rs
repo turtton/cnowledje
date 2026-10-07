@@ -309,11 +309,6 @@ pub fn print_jira_issue_markdown(output: &JiraIssueOutput) {
             println!("{}", c.body_markdown);
         }
     }
-
-    if output.omitted_comments > 0 {
-        println!();
-        println!("[{} more comments truncated]", output.omitted_comments);
-    }
 }
 
 /// Print plain text: description followed by comment bodies, no header.
@@ -322,10 +317,6 @@ pub fn print_jira_issue_plain(output: &JiraIssueOutput) {
     for c in &output.comments {
         println!();
         println!("{}", c.body_markdown);
-    }
-    if output.omitted_comments > 0 {
-        println!();
-        println!("[{} more comments truncated]", output.omitted_comments);
     }
 }
 

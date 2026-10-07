@@ -77,9 +77,6 @@ EXAMPLES:
   # Get structured JSON
   cnowledje page 123456789 --json
 
-  # Limit the content length
-  cnowledje page 123456789 --max-chars 10000
-
   # Select Japanese content from sv-translation macros
   cnowledje page 123456789 --language ja
 
@@ -90,8 +87,7 @@ NOTES:
   * Page-tree references identify a root page; use children <ID> to list its\n    direct children. Space-wide trees use children --space <KEY>.\n  * Markdown output always includes the title and URL as HTML comments;
     the last-modified date is included only when available.
   * Markdown output includes a Labels comment line when the page has labels.
-  * --max-chars is bounded by the configured max_page_chars; the smaller
-    value wins. Truncated output ends with [content truncated].
+  * Page content is output in full.
   * Supported URL forms: \"?pageId=<ID>\" and \"/pages/<ID>\".
     \"/display/SPACE/Title\" URLs are NOT supported — resolve the page ID
     via `search` first.";
@@ -201,10 +197,6 @@ pub struct PageArgs {
     #[arg(long, conflicts_with = "format")]
     pub json: bool,
 
-    /// Maximum content length in characters.
-    #[arg(long, default_value = "50000")]
-    pub max_chars: usize,
-
     /// Language code to select when the page contains sv-translation macros (e.g. ja, en).
     /// If omitted, the first sv-translation block is expanded.
     #[arg(long)]
@@ -239,14 +231,8 @@ EXAMPLES:
   # Get structured JSON
   cnowledje issue PROJ-123 --json
 
-  # Limit the combined description+comments length
-  cnowledje issue PROJ-123 --max-chars 10000
-
 NOTES:
-  * description and comments share a single --max-chars budget, further
-    capped by the configured max_page_chars (the smaller value wins).
-    Comments dropped once the budget runs out are reported via the
-    omitted_comments count.
+  * The description and all returned comments are output in full.
   * Markdown and JSON output include Confluence pages linked to the issue
     through Jira remote links when Jira exposes them.
   * Only /browse/<KEY> issue URLs are supported.";
@@ -264,10 +250,6 @@ pub struct IssueArgs {
     /// Shorthand for --format json.
     #[arg(long, conflicts_with = "format")]
     pub json: bool,
-
-    /// Maximum content length in characters (description + comments combined).
-    #[arg(long, default_value = "50000")]
-    pub max_chars: usize,
 
     /// Use a specific configuration profile.
     #[arg(long)]
@@ -408,6 +390,17 @@ mod tests {
     use cnowledje::types::SearchSource;
 
     use super::{Cli, Commands, ConfigSubcommand, TokenAction, TokenBackendSubcommand};
+
+    #[test]
+    fn content_commands_reject_removed_character_limit_option() {
+        for (command, id) in [("page", "123"), ("issue", "PROJ-1")] {
+            assert!(Cli::try_parse_from(["cnowledje", command, id]).is_ok());
+            let error = Cli::try_parse_from(["cnowledje", command, id, "--max-chars", "10000"])
+                .err()
+                .expect("the removed option must be rejected");
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+    }
 
     #[test]
     fn parses_flattened_issue_command() {

@@ -61,7 +61,7 @@ Config file (path resolved via `dirs::config_dir()`, profiles: `[default]`, `[st
 - macOS: `~/Library/Application Support/cnowledje/config.toml`
 - Windows: `%APPDATA%\cnowledje\config.toml`
 
-TOML-only settings (no env var override): `default_limit` (default: 10), `max_limit` (default: 50), `max_page_chars` (default: 50000, also the shared Jira issue char budget — see below). Note: `default_limit` is loaded but not currently applied to the CLI's `--limit` default (which is hardcoded to 10 in clap).
+TOML-only settings (no env var override): `default_limit` (default: 10), `max_limit` (default: 50). Note: `default_limit` is loaded but not currently applied to the CLI's `--limit` default (which is hardcoded to 10 in clap).
 
 **Token resolution order:**
 - Confluence: `CONFLUENCE_TOKEN` env var → system keyring (service `cnowledje`, account = profile name) → error.
@@ -103,7 +103,7 @@ The previous form with `set` or `delete` directly after `token`, including the o
   - `excerpt-include` / `excerpt-includeplus` → `> [excerpt from: Page Name]` placeholder (cross-page fetch is out of scope). `run_page` resolves the referenced page's ID via a CQL exact-title search (scoped to `ri:space-key` if present, else the current page's space) and appends it as `(id: 123456)`; falls back silently to title-only on a search miss/error. `markdown::extract_excerpt_refs` + `html_to_markdown_with_excerpt_ids` do the extraction/injection — `html_to_markdown` itself stays a pure, network-free function.
   - `sv-translation` → language-selected expansion (see `--language` flag)
   - All other macros → `[unsupported confluence macro: NAME]`
-- **Content truncation** appends `[content truncated]` when `max_chars` is exceeded; effective limit is `min(--max-chars, config.max_page_chars)`, counted in Unicode chars, not bytes.
+- **Content output** — page bodies, Jira descriptions, and all returned comments are rendered in full. `--max-chars` and the `omitted_comments` JSON field have been removed; legacy TOML `max_page_chars` entries are ignored.
 - **JSON error output** — in `--json` mode, errors are emitted as `{"error":{"kind":"…","message":"…"}}`.
 - **Space allowlist** — if `allowed_spaces` is set, passing an unlisted space to `search` is a hard error. `page <id>` does **not** check `allowed_spaces`; access is controlled solely by the token's Confluence permissions.
 - **Page URL formats** — `page` accepts a numeric ID or a URL containing `?pageId=<id>` or `/pages/<id>`. Pretty URLs like `/display/SPACE/Title` are **not** supported and return an error.
@@ -112,7 +112,7 @@ The previous form with `set` or `delete` directly after `token`, including the o
 - **Confluence label search and metadata** — `--label` is a shared filter, AND-joined as a CQL `label` clause; repeated labels use `label in (...)` with OR semantics. A query-less label-only search uses one `build_label_cql` query and reports `matched_by: ["label"]`; `--label` alone does not pin Jira. `search` and `get_page` expand `metadata.labels` and include `labels` in their output.
 - **Search configuration and execution** — a backend selected explicitly by `--source` (including `--source all`) or one with its own flags is pinned, so its configuration errors fail the command. An unpinned backend may be skipped with a stderr warning only for a missing base URL or missing default space/project; other errors fail, and if both are skipped the first skip error is returned. When both legs run, they use `tokio::try_join!`, so either failure fails the command. Human output always labels each executed backend; JSON serializes `UnifiedSearchOutput` as `{ "query": string | null, "confluence": SearchOutput | null, "jira": JiraSearchOutput | null }`, retaining both backend keys even when one is `null`.
 - **`search --source jira` runs a single JQL query** — no dedup/multi-query merge like Confluence's `both` mode.
-- **`issue` rendering** — `expand=renderedFields` HTML is converted via the existing `html_to_markdown` (which handles Confluence `ac:` macros too, but Jira's rendered HTML simply doesn't contain them; `language` is always `None` since `sv-translation` is Confluence-only); when rendered HTML is absent/empty, raw Jira wiki markup is truncated as plain text instead. Description and comments share one character budget (`min(--max-chars, JiraConfig::max_issue_chars)`, where `max_issue_chars` is sourced from the shared TOML `max_page_chars` setting); comments dropped once the budget is exhausted are reported via `omitted_comments` in the output rather than silently disappearing.
+- **`issue` rendering** — `expand=renderedFields` HTML is converted via the existing `html_to_markdown` (which handles Confluence `ac:` macros too, but Jira's rendered HTML simply doesn't contain them; `language` is always `None` since `sv-translation` is Confluence-only); when rendered HTML is absent/empty, raw Jira wiki markup is returned as trimmed plain text instead. Descriptions and all returned comments are rendered in full without a character budget.
 - **Jira issue key extraction** (`jql::extract_issue_key`) accepts a bare key (`PROJ-123`, case-normalized to uppercase) or a URL containing `/browse/<KEY>`; other URL shapes (e.g. Cloud's `?selectedIssue=`) are unsupported and return `InvalidIssueKey`.
 - **Jira keyring** uses a separate service name `cnowledje-jira` (vs. Confluence's `cnowledje`) so both tokens can coexist per profile; `config::keyring_entry` is the shared private helper behind both.
 - **Jira project allowlist** — `search --source jira` enforces `jira_allowed_projects` via `validate_projects` (same shape as Confluence's `allowed_spaces`). `issue <key>` does **not** check it — same policy as `page <id>`; access is controlled solely by the token's Jira permissions.
@@ -122,8 +122,8 @@ The previous form with `set` or `delete` directly after `token`, including the o
 Unit tests live inside each module (`#[cfg(test)]`). Integration tests are in `tests/integration_tests.rs` and cover:
 - CQL generation (single/multi-space, escaping, label clauses, `both`/`title`/`text` modes)
 - Page ID extraction from numeric strings and URLs (`?pageId=` and `/pages/<id>` patterns)
-- Markdown conversion (headings, lists, tables, code blocks, macros, Japanese UTF-8, truncation, sv-translation language selection)
-- Jira issue rendering (`render_issue_content`: HTML/raw fallback, char-budget exhaustion + `omitted_comments`, empty description/comments)
+- Markdown conversion (headings, lists, tables, code blocks, macros, Japanese UTF-8, full output beyond 50000 chars, sv-translation language selection)
+- Jira issue rendering (`render_issue_content`: HTML/raw fallback, long descriptions and complete comment output, empty description/comments)
 - JQL generation (project/status/issuetype/label single vs. `in (...)`, clause order + trailing sort, filters-only queries) and issue key extraction (bare key, `/browse/<KEY>` URL, invalid input)
 - Format helpers (`make_page_url`, `make_issue_url`) and `UnifiedSearchOutput` JSON serialization, including stable `null` backend keys
 - Config round-trips including `jira_*` `ProfileConfig` fields and `load_profile_config_at_path` merge preservation

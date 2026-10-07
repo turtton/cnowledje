@@ -38,8 +38,6 @@ pub struct ProfileConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_page_chars: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub jira_base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jira_api_path: Option<String>,
@@ -61,7 +59,6 @@ pub struct Config {
     pub default_space: Option<String>,
     pub default_limit: u32,
     pub max_limit: u32,
-    pub max_page_chars: usize,
 }
 
 /// Resolved, ready-to-use Jira configuration (Server/Data Center, PAT Bearer auth).
@@ -76,7 +73,6 @@ pub struct JiraConfig {
     pub default_project: Option<String>,
     pub default_limit: u32,
     pub max_limit: u32,
-    pub max_issue_chars: usize,
 }
 
 /// Default path for the TOML config file.
@@ -165,7 +161,6 @@ pub fn load_config(profile: Option<&str>) -> Result<Config, ConfluenceError> {
         default_space,
         default_limit: file.default_limit.unwrap_or(10),
         max_limit: file.max_limit.unwrap_or(50),
-        max_page_chars: file.max_page_chars.unwrap_or(50_000),
     })
 }
 
@@ -247,7 +242,6 @@ pub fn load_jira_config(profile: Option<&str>) -> Result<JiraConfig, ConfluenceE
         default_project,
         default_limit: file.default_limit.unwrap_or(10),
         max_limit: file.max_limit.unwrap_or(50),
-        max_issue_chars: file.max_page_chars.unwrap_or(50_000),
     })
 }
 
@@ -422,6 +416,27 @@ mod tests {
     use tempfile::tempdir;
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn legacy_content_limit_is_ignored_when_loading_profiles() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[default]\nbase_url = \"https://confluence.example.com\"\nmax_page_chars = 1\nmax_limit = 25\n",
+        )
+        .unwrap();
+
+        let profile = load_profile_config_at_path("default", &path).unwrap();
+        assert_eq!(
+            profile.base_url.as_deref(),
+            Some("https://confluence.example.com")
+        );
+        assert_eq!(profile.max_limit, Some(25));
+        assert!(!toml::to_string(&profile)
+            .unwrap()
+            .contains("max_page_chars"));
+    }
 
     #[test]
     fn save_creates_new_file_with_profile() {

@@ -326,7 +326,6 @@ pub struct JiraIssueOutput {
     pub url: String,
     pub description_markdown: String,
     pub comments: Vec<JiraCommentOutput>,
-    pub omitted_comments: u32, // comments dropped from output by the char budget
     pub confluence_references: Vec<ConfluenceReferenceOutput>,
     pub notice: &'static str,
 }

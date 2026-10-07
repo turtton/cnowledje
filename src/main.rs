@@ -603,8 +603,6 @@ async fn run_page(args: cli::PageArgs) -> Result<(), ConfluenceError> {
         .map(|s| s.value.as_str())
         .unwrap_or("");
 
-    let effective_max = std::cmp::min(args.max_chars, config.max_page_chars);
-
     // Resolve excerpt-include/-includeplus page references (title [+ space])
     // to page IDs via a CQL title search, since the storage format never
     // carries an ID for these. Falls back to title-only on any lookup miss.
@@ -681,7 +679,6 @@ async fn run_page(args: cli::PageArgs) -> Result<(), ConfluenceError> {
     }
     let content_markdown = markdown::html_to_markdown_with_page_resources(
         html,
-        effective_max,
         args.language.as_deref(),
         &excerpt_ids,
         &page_trees,
@@ -932,19 +929,13 @@ async fn run_issue(args: cli::IssueArgs) -> Result<(), ConfluenceError> {
         })
         .collect();
 
-    let effective_max = std::cmp::min(args.max_chars, config.max_issue_chars);
     let rendered_desc_html = issue
         .rendered_fields
         .as_ref()
         .and_then(|rf| rf.description.as_deref());
     let raw_desc = f.description.as_deref();
 
-    let rendered = markdown::render_issue_content(
-        rendered_desc_html,
-        raw_desc,
-        &comment_sources,
-        effective_max,
-    );
+    let rendered = markdown::render_issue_content(rendered_desc_html, raw_desc, &comment_sources);
 
     let output = JiraIssueOutput {
         key: issue.key.clone(),
@@ -967,7 +958,6 @@ async fn run_issue(args: cli::IssueArgs) -> Result<(), ConfluenceError> {
         url: make_issue_url(&config.base_url, &issue.key),
         description_markdown: rendered.description_markdown,
         comments: rendered.comments,
-        omitted_comments: rendered.omitted_comments,
         confluence_references,
         notice: JIRA_NOTICE,
     };
@@ -1019,7 +1009,6 @@ async fn run_config(args: cli::ConfigArgs) -> Result<(), ConfluenceError> {
                     );
                     println!("  default_limit  : {}", config.default_limit);
                     println!("  max_limit      : {}", config.max_limit);
-                    println!("  max_page_chars : {}", config.max_page_chars);
 
                     print!("  Checking Confluence API connectivity... ");
                     let check: Result<(), ConfluenceError> = async {
@@ -1554,7 +1543,7 @@ fn run_config_init(profile: String, confluence: bool, jira: bool) -> Result<(), 
     };
 
     let update_common_settings = if profile_exists {
-        match Confirm::new("共通設定 (default_limit / max_limit / max_page_chars) を変更しますか?")
+        match Confirm::new("共通設定 (default_limit / max_limit) を変更しますか?")
             .with_default(false)
             .prompt()
         {
@@ -1615,30 +1604,7 @@ fn run_config_init(profile: String, confluence: bool, jira: bool) -> Result<(), 
             }
             Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
         };
-        let max_page_chars =
-            match CustomType::<usize>::new("Maximum page content length (characters):")
-                .with_default(existing.max_page_chars.unwrap_or(50_000))
-                .with_parser(&|value: &str| value.trim().parse::<usize>().map_err(|_| ()))
-                .with_error_message("正の整数を入力してください")
-                .with_validator(|&value: &usize| {
-                    if value >= 1_000 {
-                        Ok(Validation::Valid)
-                    } else {
-                        Ok(Validation::Invalid(
-                            "1000 以上の値を入力してください".into(),
-                        ))
-                    }
-                })
-                .prompt()
-            {
-                Ok(value) => value,
-                Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => {
-                    println!("\nキャンセルされました");
-                    return Ok(());
-                }
-                Err(error) => return Err(ConfluenceError::ConfigError(error.to_string())),
-            };
-        Some((default_limit, max_limit, max_page_chars))
+        Some((default_limit, max_limit))
     } else {
         None
     };
@@ -1656,10 +1622,9 @@ fn run_config_init(profile: String, confluence: bool, jira: bool) -> Result<(), 
         merged.jira_allowed_projects = allowed_projects;
         merged.jira_default_project = default_project;
     }
-    if let Some((default_limit, max_limit, max_page_chars)) = common_values {
+    if let Some((default_limit, max_limit)) = common_values {
         merged.default_limit = Some(default_limit);
         merged.max_limit = Some(max_limit);
-        merged.max_page_chars = Some(max_page_chars);
     }
 
     save_profile_to_path(profile_name, &merged, &config_path)?;

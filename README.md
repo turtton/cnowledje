@@ -183,7 +183,6 @@ allowed_spaces = ["DEV", "ARCH", "OPS"]
 default_space = "DEV"
 default_limit = 10
 max_limit = 50
-max_page_chars = 50000
 jira_base_url = "https://jira.example.local"
 jira_api_path = "/rest/api/2"
 jira_allowed_projects = ["DEV", "OPS"]
@@ -209,7 +208,7 @@ cnowledje config init --profile staging --jira       # update only Jira in stagi
 cnowledje config init --confluence --jira             # update both sections
 ```
 
-`--confluence` and `--jira` skip the section-selection prompts. Without either flag, configured sections default to not being changed and show their current base URL; selected values are prefilled. Unselected backend fields remain intact. For an existing profile, shared limits (`default_limit`, `max_limit`, and `max_page_chars`) change only after a separate confirmation. `config init --force` is not supported.
+`--confluence` and `--jira` skip the section-selection prompts. Without either flag, configured sections default to not being changed and show their current base URL; selected values are prefilled. Unselected backend fields remain intact. For an existing profile, shared limits (`default_limit` and `max_limit`) change only after a separate confirmation. `config init --force` is not supported.
 
 
 ### Token management
@@ -331,13 +330,12 @@ cnowledje page 123456789 --format storage-html
 # Plain text
 cnowledje page 123456789 --format plain
 
-# Custom character limit
-cnowledje page 123456789 --max-chars 10000
-
 # Select a specific language from sv-translation macros (Scroll Versions pages)
 cnowledje page 123456789 --language ja
 cnowledje page 123456789 --language en
 ```
+
+Page content is output in full without a character limit. The former `--max-chars` option has been removed; existing `max_page_chars` configuration entries are ignored.
 
 The `pagetree` macro renders a reference such as `[ページツリー: 「Development Guide」の配下（ルートページID: 123456）]`, identifying the root title and ID. `@self` resolves to the current page, `@parent` to its parent, `@home` (also the default) to the space homepage, and named roots through an exact-title search in the selected space. `@none` identifies the whole space. Missing or failed lookups are explicitly marked unresolved. No command instructions are inserted into page content, and child lists are not fetched automatically.
 
@@ -371,10 +369,9 @@ cnowledje issue PROJ-123 --json
 
 # Plain text
 cnowledje issue PROJ-123 --format plain
-
-# Custom character limit (description + comments combined)
-cnowledje issue PROJ-123 --max-chars 10000
 ```
+
+Issue descriptions and all comments returned by Jira are output in full without a shared character budget. The former `omitted_comments` JSON field has been removed.
 
 ### Check configuration
 

@@ -214,13 +214,7 @@ mod tests {
             ConfluenceClient::new("http://127.0.0.1:1", "/rest/api", "test-token").unwrap();
         let html = r#"<ac:structured-macro ac:name="pagetree"><ac:parameter ac:name="root">@self</ac:parameter></ac:structured-macro><ac:structured-macro ac:name="pagetree"><ac:parameter ac:name="root">@parent</ac:parameter></ac:structured-macro><ac:structured-macro ac:name="pagetree"><ac:parameter ac:name="root">@none</ac:parameter><ac:parameter ac:name="spaceKey">OPS</ac:parameter></ac:structured-macro>"#;
         let descriptions = resolve_page_trees(&client, &page(), html).await;
-        let md = crate::markdown::html_to_markdown_with_references(
-            html,
-            50_000,
-            None,
-            &[],
-            &descriptions,
-        );
+        let md = crate::markdown::html_to_markdown_with_references(html, None, &[], &descriptions);
         assert!(md.contains("「開発ガイド」の配下（ルートページID: 123）"));
         assert!(md.contains("「Parent」の配下（ルートページID: 12）"));
         assert!(md.contains("スペース「OPS」全体"));
@@ -257,13 +251,7 @@ mod tests {
         .await;
         let html = r#"<p>本文</p><ac:structured-macro ac:name="pagetree"/>"#;
         let descriptions = resolve_page_trees(&client, &page(), html).await;
-        let md = crate::markdown::html_to_markdown_with_references(
-            html,
-            50_000,
-            None,
-            &[],
-            &descriptions,
-        );
+        let md = crate::markdown::html_to_markdown_with_references(html, None, &[], &descriptions);
         assert!(md.contains("本文"));
         assert!(md.contains("ルート未解決・参照先取得失敗"));
         assert!(md.contains("スペースキー: DEV"));
@@ -312,30 +300,11 @@ mod tests {
         let html = r#"<ac:structured-macro ac:name="sv-translation"><ac:parameter ac:name="language">en</ac:parameter><ac:rich-text-body><ac:structured-macro ac:name="pagetree"><ac:parameter ac:name="root">@parent</ac:parameter></ac:structured-macro></ac:rich-text-body></ac:structured-macro><ac:structured-macro ac:name="sv-translation"><ac:parameter ac:name="language">ja</ac:parameter><ac:rich-text-body><ac:structured-macro ac:name="pagetree"><ac:parameter ac:name="root">@self</ac:parameter></ac:structured-macro></ac:rich-text-body></ac:structured-macro><ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[<ac:structured-macro ac:name="pagetree"/>]]></ac:plain-text-body></ac:structured-macro>"#;
         let descriptions = resolve_page_trees(&client, &page(), html).await;
         assert_eq!(descriptions.len(), 2);
-        let md = crate::markdown::html_to_markdown_with_references(
-            html,
-            50_000,
-            Some("ja"),
-            &[],
-            &descriptions,
-        );
+        let md =
+            crate::markdown::html_to_markdown_with_references(html, Some("ja"), &[], &descriptions);
         assert!(md.contains("ルートページID: 123"));
         assert!(!md.contains("「Parent」"));
         assert!(md.contains(r#"<ac:structured-macro ac:name="pagetree"/>"#));
-        let shortened = crate::markdown::html_to_markdown_with_references(
-            html,
-            20,
-            Some("ja"),
-            &[],
-            &descriptions,
-        );
-        assert_eq!(
-            shortened,
-            format!(
-                "{}\n\n[content truncated]",
-                md.chars().take(20).collect::<String>()
-            )
-        );
     }
 
     #[tokio::test]

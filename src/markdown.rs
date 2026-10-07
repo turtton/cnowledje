@@ -736,8 +736,8 @@ pub fn extract_page_tree_refs(html: &str) -> Vec<PageTreeRef> {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-pub fn html_to_markdown(html: &str, max_chars: usize, language: Option<&str>) -> String {
-    html_to_markdown_with_excerpt_ids(html, max_chars, language, &[])
+pub fn html_to_markdown(html: &str, language: Option<&str>) -> String {
+    html_to_markdown_with_excerpt_ids(html, language, &[])
 }
 
 /// Like [`html_to_markdown`], but injects already-resolved page IDs into
@@ -746,30 +746,21 @@ pub fn html_to_markdown(html: &str, max_chars: usize, language: Option<&str>) ->
 /// `html`; `None` (or a short slice) falls back to the title-only placeholder.
 pub fn html_to_markdown_with_excerpt_ids(
     html: &str,
-    max_chars: usize,
     language: Option<&str>,
     excerpt_ids: &[Option<String>],
 ) -> String {
-    html_to_markdown_with_references(html, max_chars, language, excerpt_ids, &HashMap::new())
+    html_to_markdown_with_references(html, language, excerpt_ids, &HashMap::new())
 }
 
 /// Convert with resolved page-tree descriptions, keyed by root identity so
 /// skipped translations cannot shift references belonging to later macros.
 pub fn html_to_markdown_with_references(
     html: &str,
-    max_chars: usize,
     language: Option<&str>,
     excerpt_ids: &[Option<String>],
     page_trees: &HashMap<PageTreeRef, String>,
 ) -> String {
-    html_to_markdown_with_page_resources(
-        html,
-        max_chars,
-        language,
-        excerpt_ids,
-        page_trees,
-        &HashMap::new(),
-    )
+    html_to_markdown_with_page_resources(html, language, excerpt_ids, page_trees, &HashMap::new())
 }
 
 /// Names of Mermaid source attachments, deduplicated in document order.
@@ -792,7 +783,6 @@ pub fn extract_mermaid_filenames(html: &str) -> Vec<String> {
 /// `revision` versions the rendered SVG, not the source attachment.
 pub fn html_to_markdown_with_page_resources(
     html: &str,
-    max_chars: usize,
     language: Option<&str>,
     excerpt_ids: &[Option<String>],
     page_trees: &HashMap<PageTreeRef, String>,
@@ -812,26 +802,7 @@ pub fn html_to_markdown_with_page_resources(
     ctx.mermaid_sources = mermaid_sources.clone();
     convert_children(root, &mut out, &mut ctx);
 
-    let trimmed = collapse_blank_lines(out.trim());
-
-    truncate_with_marker(&trimmed, max_chars)
-}
-
-/// Truncate `s` to at most `max_chars` Unicode chars, appending a
-/// `[content truncated]` marker when truncation occurs.
-fn truncate_with_marker(s: &str, max_chars: usize) -> String {
-    if s.chars().count() > max_chars {
-        let mut byte_pos = 0;
-        for (char_count, c) in s.chars().enumerate() {
-            if char_count >= max_chars {
-                break;
-            }
-            byte_pos += c.len_utf8();
-        }
-        format!("{}\n\n[content truncated]", &s[..byte_pos])
-    } else {
-        s.to_string()
-    }
+    collapse_blank_lines(out.trim())
 }
 
 // ── Recursive converter ───────────────────────────────────────────────────────
@@ -1446,60 +1417,37 @@ pub struct IssueCommentSource {
 pub struct RenderedIssue {
     pub description_markdown: String,
     pub comments: Vec<crate::models::JiraCommentOutput>,
-    pub omitted_comments: u32,
 }
 
-/// Render a Jira issue's description and comments into Markdown under a
-/// single shared character budget (`max_chars`): the description is
-/// rendered first, then comments in order until the budget runs out. HTML
-/// input (from `expand=renderedFields`) is preferred; raw Jira wiki markup
-/// is truncated as plain text when no rendered HTML is available.
-/// `language` is always `None` since `sv-translation` is a Confluence-only
-/// macro.
+/// Render the full Jira description and every returned comment as Markdown.
+/// Rendered HTML is preferred; absent or empty HTML falls back to trimmed raw
+/// Jira wiki markup. Language selection is Confluence-only.
 pub fn render_issue_content(
     description_html: Option<&str>,
     description_raw: Option<&str>,
     comments: &[IssueCommentSource],
-    max_chars: usize,
 ) -> RenderedIssue {
-    let mut remaining = max_chars;
-
-    let description_markdown = render_issue_text(description_html, description_raw, remaining);
-    remaining = remaining.saturating_sub(description_markdown.chars().count());
-
-    let mut rendered_comments = Vec::with_capacity(comments.len());
-    let mut omitted_comments = 0u32;
-
-    for (i, c) in comments.iter().enumerate() {
-        if remaining == 0 {
-            omitted_comments = (comments.len() - i) as u32;
-            break;
-        }
-        let body = render_issue_text(c.body_html.as_deref(), c.body_raw.as_deref(), remaining);
-        remaining = remaining.saturating_sub(body.chars().count());
-        rendered_comments.push(crate::models::JiraCommentOutput {
-            author: c.author.clone(),
-            created: c.created.clone(),
-            body_markdown: body,
-        });
-    }
-
     RenderedIssue {
-        description_markdown,
-        comments: rendered_comments,
-        omitted_comments,
+        description_markdown: render_issue_text(description_html, description_raw),
+        comments: comments
+            .iter()
+            .map(|comment| crate::models::JiraCommentOutput {
+                author: comment.author.clone(),
+                created: comment.created.clone(),
+                body_markdown: render_issue_text(
+                    comment.body_html.as_deref(),
+                    comment.body_raw.as_deref(),
+                ),
+            })
+            .collect(),
     }
 }
 
-/// Shared HTML-preferred/raw-fallback rendering rule used for both the
-/// issue description and each comment body.
-fn render_issue_text(html: Option<&str>, raw: Option<&str>, max_chars: usize) -> String {
+/// Prefer non-empty HTML; otherwise fall back to raw wiki markup.
+fn render_issue_text(html: Option<&str>, raw: Option<&str>) -> String {
     match html {
-        Some(html) if !html.trim().is_empty() => html_to_markdown(html, max_chars, None),
-        _ => match raw {
-            Some(raw) => truncate_with_marker(raw.trim(), max_chars),
-            None => String::new(),
-        },
+        Some(html) if !html.trim().is_empty() => html_to_markdown(html, None),
+        _ => raw.unwrap_or("").trim().to_string(),
     }
 }
 
@@ -1511,19 +1459,19 @@ mod tests {
 
     #[test]
     fn test_heading() {
-        let md = html_to_markdown("<h1>Hello</h1>", 50_000, None);
+        let md = html_to_markdown("<h1>Hello</h1>", None);
         assert!(md.contains("# Hello"));
     }
 
     #[test]
     fn test_paragraph() {
-        let md = html_to_markdown("<p>Some text</p>", 50_000, None);
+        let md = html_to_markdown("<p>Some text</p>", None);
         assert!(md.contains("Some text"));
     }
 
     #[test]
     fn test_strong() {
-        let md = html_to_markdown("<p><strong>bold</strong></p>", 50_000, None);
+        let md = html_to_markdown("<p><strong>bold</strong></p>", None);
         assert!(md.contains("**bold**"));
     }
 
@@ -1551,14 +1499,14 @@ mod tests {
                 "[節](#section)",
             ),
         ] {
-            assert_eq!(html_to_markdown(html, 50_000, None).trim(), expected);
+            assert_eq!(html_to_markdown(html, None).trim(), expected);
         }
     }
 
     #[test]
     fn same_page_anchor_link_and_macro_target_survive() {
         let html = r#"<p><ac:link ac:anchor="詳細 (A)&amp;B"><ac:link-body><strong>詳細へ</strong></ac:link-body></ac:link></p><ac:structured-macro ac:name="anchor"><ac:default-parameter>詳細 (A)&amp;B</ac:default-parameter></ac:structured-macro><p>本文</p>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("[**詳細へ**](#詳細%20%28A%29%26B)"), "{md}");
         assert!(md.contains(r#"<a id="詳細 (A)&amp;B"></a>"#), "{md}");
         assert!(md.contains("本文"));
@@ -1567,7 +1515,7 @@ mod tests {
     #[test]
     fn self_closing_anchor_links_survive_table_conversion() {
         let html = r#"<table><tbody><tr><td><ac:link ac:anchor="項目A" /></td><td>型A</td><td><p><br /></p></td></tr><tr><td><ac:link ac:anchor="項目B"/></td><td>型B</td><td><p><br /></p></td></tr></tbody></table>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         let rows: Vec<_> = md.lines().collect();
         assert_eq!(rows.len(), 2, "{md}");
         assert!(rows[0].contains("[項目A](#項目A)"), "{md}");
@@ -1580,7 +1528,7 @@ mod tests {
     fn self_closing_anchor_does_not_consume_following_link() {
         let html = r#"<p><ac:link ac:anchor="first" /> / <ac:link ac:anchor="second"><ac:plain-text-link-body><![CDATA[Second label]]></ac:plain-text-link-body></ac:link> / <ac:link ac:anchor="third"/></p>"#;
         assert_eq!(
-            html_to_markdown(html, 50_000, None),
+            html_to_markdown(html, None),
             "[first](#first) / [Second label](#second) / [third](#third)"
         );
     }
@@ -1588,10 +1536,7 @@ mod tests {
     #[test]
     fn self_closing_anchor_decodes_entities_and_encodes_fragment() {
         let html = r#"<ac:link ac:anchor="A &amp; B" />"#;
-        assert_eq!(
-            html_to_markdown(html, 50_000, None),
-            "[A & B](#A%20%26%20B)"
-        );
+        assert_eq!(html_to_markdown(html, None), "[A & B](#A%20%26%20B)");
     }
 
     #[test]
@@ -1609,14 +1554,14 @@ mod tests {
 
     #[test]
     fn anchor_without_label_uses_anchor_name() {
-        let md = html_to_markdown(r#"<ac:link ac:anchor="section"></ac:link>"#, 50_000, None);
+        let md = html_to_markdown(r#"<ac:link ac:anchor="section"></ac:link>"#, None);
         assert_eq!(md.trim(), "[section](#section)");
     }
 
     #[test]
     fn html_anchor_targets_survive() {
         let html = r##"<p><a href="#section">Go</a></p><h2 id="section">Section</h2><a name="legacy"></a><a id="both" name="both"></a>"##;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("[Go](#section)"));
         assert!(md.contains(r#"<a id="section"></a>"#));
         assert!(md.contains("## Section"));
@@ -1626,7 +1571,7 @@ mod tests {
 
     #[test]
     fn anchor_target_attributes_are_escaped() {
-        let md = html_to_markdown(r#"<a name="a&quot;&lt;&amp;"></a>"#, 50_000, None);
+        let md = html_to_markdown(r#"<a name="a&quot;&lt;&amp;"></a>"#, None);
         assert_eq!(md.trim(), r#"<a id="a&quot;&lt;&amp;"></a>"#);
     }
 
@@ -1634,7 +1579,6 @@ mod tests {
     fn cross_page_anchor_is_not_mistaken_for_local_anchor() {
         let md = html_to_markdown(
             r#"<ac:link ac:anchor="section"><ri:page ri:content-title="Other"/><ac:plain-text-link-body><![CDATA[Other section]]></ac:plain-text-link-body></ac:link>"#,
-            50_000,
             None,
         );
         assert_eq!(md.trim(), "Other section");
@@ -1642,34 +1586,34 @@ mod tests {
 
     #[test]
     fn test_link() {
-        let md = html_to_markdown(r#"<a href="https://example.com">Example</a>"#, 50_000, None);
+        let md = html_to_markdown(r#"<a href="https://example.com">Example</a>"#, None);
         assert!(md.contains("[Example](https://example.com)"));
     }
 
     #[test]
     fn test_unordered_list() {
-        let md = html_to_markdown("<ul><li>A</li><li>B</li></ul>", 50_000, None);
+        let md = html_to_markdown("<ul><li>A</li><li>B</li></ul>", None);
         assert!(md.contains("- A"));
         assert!(md.contains("- B"));
     }
 
     #[test]
     fn test_ordered_list() {
-        let md = html_to_markdown("<ol><li>First</li><li>Second</li></ol>", 50_000, None);
+        let md = html_to_markdown("<ol><li>First</li><li>Second</li></ol>", None);
         assert!(md.contains("1. First"));
         assert!(md.contains("2. Second"));
     }
 
     #[test]
     fn test_code_inline() {
-        let md = html_to_markdown("<code>let x = 1;</code>", 50_000, None);
+        let md = html_to_markdown("<code>let x = 1;</code>", None);
         assert!(md.contains("`let x = 1;`"));
     }
 
     #[test]
     fn test_macro_placeholder() {
         let html = r#"<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">PROJ-1</ac:parameter></ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         // Parameter values are now shown in the placeholder for visibility.
         assert!(
             md.contains("[unsupported confluence macro: jira"),
@@ -1679,23 +1623,22 @@ mod tests {
     }
 
     #[test]
-    fn test_truncation() {
-        let html = "<p>".to_string() + &"x".repeat(200) + "</p>";
-        let md = html_to_markdown(&html, 50, None);
-        assert!(md.contains("[content truncated]"));
-        assert!(md.chars().count() <= 50 + "[content truncated]\n\n".len());
+    fn test_long_content_is_preserved() {
+        let body = "x".repeat(60_000) + "END";
+        let html = format!("<p>{body}</p>");
+        assert_eq!(html_to_markdown(&html, None), body);
     }
 
     #[test]
     fn test_japanese_utf8() {
-        let md = html_to_markdown("<p>Redisの利用方針について</p>", 50_000, None);
+        let md = html_to_markdown("<p>Redisの利用方針について</p>", None);
         assert!(md.contains("Redisの利用方針について"));
     }
 
     #[test]
     fn test_table() {
         let html = "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>";
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("| A | B |"));
         assert!(md.contains("| --- | --- |"));
         assert!(md.contains("| 1 | 2 |"));
@@ -1712,7 +1655,7 @@ mod tests {
   <ac:parameter ac:name="language">en</ac:parameter>
   <ac:rich-text-body><p>English content</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(
             md.contains("日本語コンテンツ"),
             "first block should be expanded"
@@ -1735,7 +1678,7 @@ mod tests {
   <ac:parameter ac:name="language">en</ac:parameter>
   <ac:rich-text-body><p>English content</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, Some("en"));
+        let md = html_to_markdown(html, Some("en"));
         assert!(
             !md.contains("日本語コンテンツ"),
             "ja block should not be expanded"
@@ -1754,7 +1697,7 @@ mod tests {
   <ac:parameter ac:name="language">ja</ac:parameter>
   <ac:rich-text-body><p>日本語コンテンツ</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, Some("fr"));
+        let md = html_to_markdown(html, Some("fr"));
         assert!(
             !md.contains("日本語コンテンツ"),
             "non-matching language should not be expanded"
@@ -1770,7 +1713,7 @@ mod tests {
   <ac:parameter ac:name="title">Click to expand</ac:parameter>
   <ac:rich-text-body><p>Hidden content here.</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(
             md.contains("<details open>"),
             "expand opening tag should appear"
@@ -1798,7 +1741,7 @@ mod tests {
         let html = r#"<ac:structured-macro ac:name="expand">
   <ac:rich-text-body><p>Body text.</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(
             md.contains("<summary>▸ Expand</summary>"),
             "default title 'Expand' should be used in the summary"
@@ -1815,7 +1758,7 @@ mod tests {
   <ac:parameter ac:name="language">rust</ac:parameter>
   <ac:plain-text-body><![CDATA[fn main() {}]]></ac:plain-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("```rust"), "language fence should appear");
         assert!(md.contains("fn main() {}"), "code body should appear");
         assert!(md.contains("```"), "closing fence should appear");
@@ -1827,7 +1770,7 @@ mod tests {
   <ac:parameter ac:name="language">html</ac:parameter>
   <ac:plain-text-body><![CDATA[<div class="a" & b>text</div>]]></ac:plain-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(
             md.contains(r#"<div class="a" & b>text</div>"#),
             "HTML special chars in CDATA should be preserved: {md}"
@@ -1842,7 +1785,7 @@ mod tests {
   <ac:parameter ac:name="linenumbers">true</ac:parameter>
   <ac:plain-text-body><![CDATA[System.out.println("hi");]]></ac:plain-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(
             !md.contains("My Snippet"),
             "extra params must not appear in output"
@@ -1863,7 +1806,7 @@ mod tests {
   <ac:plain-text-body><![CDATA[plain text block
 second line]]></ac:plain-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("```\n"), "opening fence without language");
         assert!(md.contains("plain text block"));
         assert!(md.contains("second line"));
@@ -1876,7 +1819,7 @@ second line]]></ac:plain-text-body>
         let html = r#"<ac:structured-macro ac:name="info">
   <ac:rich-text-body><p>Important note here.</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("> **Info:**"), "Info label should appear");
         assert!(md.contains("Important note here."), "body should appear");
         assert!(!md.contains("[unsupported confluence macro: info]"));
@@ -1887,7 +1830,7 @@ second line]]></ac:plain-text-body>
         let html = r#"<ac:structured-macro ac:name="warning">
   <ac:rich-text-body><p>Danger!</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("> **Warning:**"));
         assert!(md.contains("Danger!"));
     }
@@ -1896,13 +1839,11 @@ second line]]></ac:plain-text-body>
     fn test_note_and_tip_macros() {
         let note_md = html_to_markdown(
             r#"<ac:structured-macro ac:name="note"><ac:rich-text-body><p>A note.</p></ac:rich-text-body></ac:structured-macro>"#,
-            50_000,
             None,
         );
         assert!(note_md.contains("> **Note:**"));
         let tip_md = html_to_markdown(
             r#"<ac:structured-macro ac:name="tip"><ac:rich-text-body><p>A tip.</p></ac:rich-text-body></ac:structured-macro>"#,
-            50_000,
             None,
         );
         assert!(tip_md.contains("> **Tip:**"));
@@ -1916,7 +1857,7 @@ second line]]></ac:plain-text-body>
   <ac:parameter ac:name="title">Panel Title</ac:parameter>
   <ac:rich-text-body><p>Panel body.</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("> **Panel Title**"));
         assert!(md.contains("Panel body."));
     }
@@ -1926,7 +1867,7 @@ second line]]></ac:plain-text-body>
         let html = r#"<ac:structured-macro ac:name="panel">
   <ac:rich-text-body><p>No title panel.</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("No title panel."));
         // No title line should appear
         assert!(!md.contains("> **"));
@@ -1938,7 +1879,7 @@ second line]]></ac:plain-text-body>
     fn test_status_macro_inline_no_paragraph_break() {
         // status is a <span> so it must not break the surrounding <p>
         let html = r#"<p>Status is <ac:structured-macro ac:name="status"><ac:parameter ac:name="title">DONE</ac:parameter></ac:structured-macro> today.</p>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("[DONE]"), "status badge should appear");
         // The whole paragraph should be on a single (logical) line
         let lines: Vec<&str> = md.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -1961,7 +1902,7 @@ second line]]></ac:plain-text-body>
     #[test]
     fn test_toc_macro() {
         let html = r#"<ac:structured-macro ac:name="toc" ac:schema-version="1"/>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("[TOC]"));
         assert!(!md.contains("[unsupported confluence macro: toc]"));
     }
@@ -1971,7 +1912,7 @@ second line]]></ac:plain-text-body>
     #[test]
     fn test_anchor_macro_preserves_target() {
         let html = r#"<p>Before</p><ac:structured-macro ac:name="anchor"><ac:parameter ac:name="default">my-anchor</ac:parameter></ac:structured-macro><p>After</p>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("Before"), "before text should appear");
         assert!(md.contains("After"), "after text should appear");
         assert!(md.contains(r#"<a id="my-anchor"></a>"#));
@@ -1983,7 +1924,7 @@ second line]]></ac:plain-text-body>
     #[test]
     fn inline_excerpt_keeps_anchor_links_in_paragraph() {
         let html = r#"<p>前<ac:structured-macro ac:name="excerpt"><ac:parameter ac:name="atlassian-macro-output-type">INLINE</ac:parameter><ac:rich-text-body><ac:link ac:anchor="section"><ac:plain-text-link-body><![CDATA[詳細へ]]></ac:plain-text-link-body></ac:link></ac:rich-text-body></ac:structured-macro>後</p><ac:structured-macro ac:name="anchor"><ac:parameter ac:name="">section</ac:parameter></ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert_eq!(md, "前[詳細へ](#section)後\n<a id=\"section\"></a>");
         assert!(!preprocess(html).contains(r#"<div class="ac-macro" data-macro-name="excerpt""#));
     }
@@ -1991,7 +1932,7 @@ second line]]></ac:plain-text-body>
     #[test]
     fn block_excerpt_preserves_links_targets_and_nested_macros() {
         let html = r#"<ac:structured-macro ac:name="excerpt"><ac:rich-text-body><p><ac:link ac:anchor="section"><ac:link-body><strong>詳細</strong></ac:link-body></ac:link></p><ac:structured-macro ac:name="anchor"><ac:default-parameter>section</ac:default-parameter></ac:structured-macro><ac:structured-macro ac:name="info"><ac:rich-text-body><p>本文</p></ac:rich-text-body></ac:structured-macro></ac:rich-text-body></ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(md.contains("[**詳細**](#section)"), "{md}");
         assert!(md.contains(r#"<a id="section"></a>"#), "{md}");
         assert!(md.contains("> **Info:**"), "{md}");
@@ -2002,13 +1943,13 @@ second line]]></ac:plain-text-body>
     #[test]
     fn excerpt_inside_link_body_keeps_visible_label() {
         let html = r#"<p><ac:link ac:anchor="section"><ac:link-body><ac:structured-macro ac:name="excerpt"><ac:parameter ac:name="atlassian-macro-output-type">INLINE</ac:parameter><ac:rich-text-body>表示文字</ac:rich-text-body></ac:structured-macro></ac:link-body></ac:link></p>"#;
-        assert_eq!(html_to_markdown(html, 50_000, None), "[表示文字](#section)");
+        assert_eq!(html_to_markdown(html, None), "[表示文字](#section)");
     }
 
     #[test]
     fn hidden_excerpt_keeps_source_content() {
         let html = r#"<ac:structured-macro ac:name="excerpt"><ac:parameter ac:name="hidden">true</ac:parameter><ac:rich-text-body><p>抜粋本文</p></ac:rich-text-body></ac:structured-macro>"#;
-        assert_eq!(html_to_markdown(html, 50_000, None), "抜粋本文");
+        assert_eq!(html_to_markdown(html, None), "抜粋本文");
     }
 
     #[test]
@@ -2017,7 +1958,7 @@ second line]]></ac:plain-text-body>
         let html = r#"<ac:structured-macro ac:name="excerpt-includeplus">
   <ac:default-parameter><ac:link><ri:page ri:content-title="Source Page"/></ac:link></ac:default-parameter>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(
             md.contains("[excerpt from: Source Page]"),
             "page name should appear in placeholder: {md}"
@@ -2057,8 +1998,7 @@ second line]]></ac:plain-text-body>
         let html = r#"<ac:structured-macro ac:name="excerpt-include">
   <ac:default-parameter><ac:link><ri:page ri:content-title="Source Page"/></ac:link></ac:default-parameter>
 </ac:structured-macro>"#;
-        let md =
-            html_to_markdown_with_excerpt_ids(html, 50_000, None, &[Some("123456".to_string())]);
+        let md = html_to_markdown_with_excerpt_ids(html, None, &[Some("123456".to_string())]);
         assert!(
             md.contains("[excerpt from: Source Page (id: 123456)]"),
             "resolved id should appear in placeholder: {md}"
@@ -2070,7 +2010,7 @@ second line]]></ac:plain-text-body>
         let html = r#"<ac:structured-macro ac:name="excerpt-include">
   <ac:default-parameter><ac:link><ri:page ri:content-title="Source Page"/></ac:link></ac:default-parameter>
 </ac:structured-macro>"#;
-        let md = html_to_markdown_with_excerpt_ids(html, 50_000, None, &[None]);
+        let md = html_to_markdown_with_excerpt_ids(html, None, &[None]);
         assert!(
             md.contains("[excerpt from: Source Page]"),
             "unresolved lookup should fall back to title-only: {md}"
@@ -2088,8 +2028,7 @@ second line]]></ac:plain-text-body>
 <ac:structured-macro ac:name="excerpt-includeplus">
   <ac:default-parameter><ac:link><ri:page ri:content-title="Second"/></ac:link></ac:default-parameter>
 </ac:structured-macro>"#;
-        let md =
-            html_to_markdown_with_excerpt_ids(html, 50_000, None, &[None, Some("999".to_string())]);
+        let md = html_to_markdown_with_excerpt_ids(html, None, &[None, Some("999".to_string())]);
         assert!(md.contains("[excerpt from: First]"));
         assert!(md.contains("[excerpt from: Second (id: 999)]"));
     }
@@ -2107,7 +2046,7 @@ second line]]></ac:plain-text-body>
     </ac:structured-macro>
   </ac:rich-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         let details_open = md
             .find("<details open>")
             .expect("expand opening tag should appear");
@@ -2130,7 +2069,7 @@ second line]]></ac:plain-text-body>
     #[test]
     fn test_self_closing_macro_does_not_swallow_content() {
         let html = r#"<ac:structured-macro ac:name="toc" ac:schema-version="1"/><p>After TOC</p>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         assert!(
             md.contains("After TOC"),
             "content after self-closing macro must appear"
@@ -2147,7 +2086,7 @@ second line]]></ac:plain-text-body>
   <ac:parameter ac:name="title">Say &quot;hello&quot;</ac:parameter>
   <ac:rich-text-body><p>Body.</p></ac:rich-text-body>
 </ac:structured-macro>"#;
-        let md = html_to_markdown(html, 50_000, None);
+        let md = html_to_markdown(html, None);
         // html5ever decodes &quot; back to " when reading the attribute value
         let details_open = md
             .find("<details open>")
@@ -2167,7 +2106,7 @@ second line]]></ac:plain-text-body>
     // ── render_issue_content ──────────────────────────────────────────────────
 
     #[test]
-    fn test_render_issue_content_within_budget_all_comments_included() {
+    fn test_render_issue_content_all_comments_included() {
         let comments = vec![
             IssueCommentSource {
                 author: Some("alice".to_string()),
@@ -2187,10 +2126,8 @@ second line]]></ac:plain-text-body>
             Some("<p>Issue <strong>description</strong> here.</p>"),
             None,
             &comments,
-            10_000,
         );
 
-        assert_eq!(rendered.omitted_comments, 0);
         assert_eq!(rendered.comments.len(), 2);
         assert!(
             rendered.description_markdown.contains("**description**"),
@@ -2217,23 +2154,23 @@ second line]]></ac:plain-text-body>
     }
 
     #[test]
-    fn test_render_issue_content_budget_exhausted_omits_trailing_comments() {
-        // A description long enough that html_to_markdown truncates it,
-        // guaranteeing the remaining budget saturates to 0 before any
-        // comment is considered.
-        let description_html = format!("<p>{}</p>", "A".repeat(50));
+    fn test_render_issue_content_long_description_preserves_all_comments() {
+        let description = "説明".repeat(30_000) + "END";
+        let description_html = format!("<p>{description}</p>");
+        let html_comment = "コメント".repeat(15_000) + "HTML END";
+        let raw_comment = "Raw comment ".repeat(5_000) + "RAW END";
         let comments = vec![
             IssueCommentSource {
                 author: Some("alice".to_string()),
                 created: None,
-                body_html: Some("<p>Comment one</p>".to_string()),
+                body_html: Some(format!("<p>{html_comment}</p>")),
                 body_raw: None,
             },
             IssueCommentSource {
                 author: Some("bob".to_string()),
                 created: None,
-                body_html: Some("<p>Comment two</p>".to_string()),
-                body_raw: None,
+                body_html: None,
+                body_raw: Some(raw_comment.clone()),
             },
             IssueCommentSource {
                 author: Some("carol".to_string()),
@@ -2243,47 +2180,36 @@ second line]]></ac:plain-text-body>
             },
         ];
 
-        let rendered = render_issue_content(Some(&description_html), None, &comments, 10);
+        let rendered = render_issue_content(Some(&description_html), None, &comments);
 
-        assert!(rendered.omitted_comments > 0);
-        assert_eq!(
-            rendered.comments.len() + rendered.omitted_comments as usize,
-            comments.len(),
-            "every comment must be either rendered or counted as omitted"
-        );
+        assert_eq!(rendered.description_markdown, description);
+        assert_eq!(rendered.comments.len(), comments.len());
+        assert_eq!(rendered.comments[0].body_markdown, html_comment);
+        assert_eq!(rendered.comments[1].body_markdown, raw_comment);
+        assert_eq!(rendered.comments[2].body_markdown, "Comment three");
     }
 
     #[test]
     fn test_render_issue_content_description_falls_back_to_raw_when_html_absent() {
-        let raw = "  Raw description text that is quite long indeed exceeding budget  ";
-        let rendered = render_issue_content(None, Some(raw), &[], 10);
-
-        // No HTML at all: the raw text is trimmed and truncated exactly like
-        // html_to_markdown's own truncation rule.
-        assert_eq!(
-            rendered.description_markdown,
-            truncate_with_marker(raw.trim(), 10)
-        );
-        assert!(rendered
-            .description_markdown
-            .contains("[content truncated]"));
+        let raw = format!("  {}END  ", "Raw description ".repeat(5_000));
+        let rendered = render_issue_content(None, Some(&raw), &[]);
+        assert_eq!(rendered.description_markdown, raw.trim());
     }
 
     #[test]
     fn test_render_issue_content_description_falls_back_to_raw_when_html_empty_string() {
         // An empty (not None) HTML string does not count as "has HTML".
-        let rendered = render_issue_content(Some(""), Some("Fallback raw text"), &[], 10_000);
+        let rendered = render_issue_content(Some(""), Some("Fallback raw text"), &[]);
 
         assert_eq!(rendered.description_markdown, "Fallback raw text");
     }
 
     #[test]
     fn test_render_issue_content_all_empty() {
-        let rendered = render_issue_content(None, None, &[], 100);
+        let rendered = render_issue_content(None, None, &[]);
 
         assert_eq!(rendered.description_markdown, "");
         assert!(rendered.comments.is_empty());
-        assert_eq!(rendered.omitted_comments, 0);
     }
 
     #[test]
@@ -2295,9 +2221,8 @@ second line]]></ac:plain-text-body>
             body_raw: Some("Plain fallback text".to_string()),
         }];
 
-        let rendered = render_issue_content(None, None, &comments, 10_000);
+        let rendered = render_issue_content(None, None, &comments);
 
-        assert_eq!(rendered.omitted_comments, 0);
         assert_eq!(rendered.comments.len(), 1);
         assert_eq!(rendered.comments[0].body_markdown, "Plain fallback text");
     }

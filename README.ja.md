@@ -164,7 +164,6 @@ allowed_spaces = ["DEV", "ARCH", "OPS"]
 default_space = "DEV"
 default_limit = 10
 max_limit = 50
-max_page_chars = 50000
 jira_base_url = "https://jira.example.local"
 jira_api_path = "/rest/api/2"
 jira_allowed_projects = ["DEV", "OPS"]
@@ -190,7 +189,7 @@ cnowledje config init --profile staging --jira       # update only Jira in stagi
 cnowledje config init --confluence --jira             # update both sections
 ```
 
-`--confluence`と`--jira`を指定すると、セクション選択のプロンプトを省略します。どちらのフラグも指定しない場合、設定済みセクションは変更しない状態がデフォルトとなり、現在のベースURLが表示されます。選択した値には現在の値があらかじめ入力されます。選択していないバックエンドのフィールドはそのまま保持されます。既存プロファイルでは、共有上限（`default_limit`、`max_limit`、`max_page_chars`）は別の確認を承諾した場合にのみ変更されます。`config init --force`はサポートされていません。
+`--confluence`と`--jira`を指定すると、セクション選択のプロンプトを省略します。どちらのフラグも指定しない場合、設定済みセクションは変更しない状態がデフォルトとなり、現在のベースURLが表示されます。選択した値には現在の値があらかじめ入力されます。選択していないバックエンドのフィールドはそのまま保持されます。既存プロファイルでは、共有上限（`default_limit`、`max_limit`）は別の確認を承諾した場合にのみ変更されます。`config init --force`はサポートされていません。
 
 ### トークン管理
 
@@ -309,13 +308,12 @@ cnowledje page 123456789 --format storage-html
 # Plain text
 cnowledje page 123456789 --format plain
 
-# Custom character limit
-cnowledje page 123456789 --max-chars 10000
-
 # Select a specific language from sv-translation macros (Scroll Versions pages)
 cnowledje page 123456789 --language ja
 cnowledje page 123456789 --language en
 ```
+
+ページ本文は文字数制限なしで全文を出力します。従来の `--max-chars` オプションは廃止され、既存設定の `max_page_chars` は無視されます。
 
 `pagetree` マクロは `[ページツリー: 「開発ガイド」の配下（ルートページID: 123456）]` のような参照情報に変換します。`@self` は現在のページ、`@parent` は親、`@home`・省略時はスペースのホームページ、ページ名は指定スペース内で解決します。`@none` はスペース全体の参照になります。取得失敗や検索不一致は「ルート未解決」と明示します。本文に操作案内は挿入せず、子ページ一覧は自動取得しません。
 
@@ -347,10 +345,9 @@ cnowledje issue PROJ-123 --json
 
 # Plain text
 cnowledje issue PROJ-123 --format plain
-
-# Custom character limit (description + comments combined)
-cnowledje issue PROJ-123 --max-chars 10000
 ```
+
+issue の説明とJiraから返されたすべてのコメントは、共有の文字数制限なしで全文を出力します。従来のJSONフィールド `omitted_comments` は廃止されました。
 
 ### 設定の確認
 
