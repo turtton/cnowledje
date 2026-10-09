@@ -385,6 +385,21 @@ fn markdown_ordered_list() {
 }
 
 #[test]
+fn jira_description_and_comments_preserve_nested_lists() {
+    let html = "<ol><li>Parent<ul><li>Child<ol><li>Grandchild</li></ol></li></ul></li><li>Sibling</li></ol>";
+    let comments = [markdown::IssueCommentSource {
+        author: Some("alice".into()),
+        created: None,
+        body_html: Some(html.into()),
+        body_raw: Some("raw fallback".into()),
+    }];
+    let rendered = markdown::render_issue_content(Some(html), Some("raw fallback"), &comments);
+    let expected = "1. Parent\n   - Child\n     1. Grandchild\n2. Sibling";
+    assert_eq!(rendered.description_markdown, expected);
+    assert_eq!(rendered.comments[0].body_markdown, expected);
+}
+
+#[test]
 fn markdown_inline_code() {
     let md = markdown::html_to_markdown("<code>let x = 42;</code>", None);
     assert!(md.contains("`let x = 42;`"));

@@ -628,14 +628,6 @@ impl Ctx {
         self.excerpt_index += 1;
         id
     }
-
-    fn list_depth(&self) -> usize {
-        self.list_stack.len()
-    }
-
-    fn list_indent(&self) -> String {
-        "  ".repeat(self.list_depth().saturating_sub(1))
-    }
 }
 
 // ── Cross-page excerpt reference extraction ────────────────────────────────────
@@ -1003,7 +995,6 @@ fn convert_element(elem: ElementRef<'_>, out: &mut String, ctx: &mut Ctx) {
 
         // List item
         "li" => {
-            let indent = ctx.list_indent();
             let bullet = match ctx.list_stack.last_mut() {
                 Some(ListKind::Unordered) => "- ".to_string(),
                 Some(ListKind::Ordered(n)) => {
@@ -1012,11 +1003,36 @@ fn convert_element(elem: ElementRef<'_>, out: &mut String, ctx: &mut Ctx) {
                 }
                 None => "- ".to_string(),
             };
+            // An item can consist solely of a child list. Keep its marker on
+            // its own line so the child's first item is not used as its label.
+            let starts_with_list = elem
+                .children()
+                .find(|child| match child.value() {
+                    Node::Text(t) => !t.trim().is_empty(),
+                    Node::Element(_) => true,
+                    _ => false,
+                })
+                .and_then(ElementRef::wrap)
+                .is_some_and(|child| matches!(child.value().name(), "ul" | "ol"));
             let mut inner = String::new();
             convert_children(elem, &mut inner, ctx);
-            let first_line = inner.trim().lines().next().unwrap_or("").to_string();
-            out.push_str(&format!("{}{}{}\n", indent, bullet, first_line));
-            // Sub-lists are handled by the nested ul/ol elements inside li.
+            let mut lines = inner.trim().lines();
+            out.push_str(&bullet);
+            if !starts_with_list {
+                out.push_str(lines.next().unwrap_or(""));
+            }
+            out.push('\n');
+            // Render relative to this item. Each parent adds its marker's
+            // width, preserving child lists, paragraphs and code indentation
+            // even when an ordered marker grows to multiple digits.
+            let continuation_indent = " ".repeat(bullet.len());
+            for line in lines {
+                if !line.is_empty() {
+                    out.push_str(&continuation_indent);
+                    out.push_str(line);
+                }
+                out.push('\n');
+            }
         }
 
         // Definition list
@@ -1602,6 +1618,44 @@ mod tests {
         let md = html_to_markdown("<ol><li>First</li><li>Second</li></ol>", None);
         assert!(md.contains("1. First"));
         assert!(md.contains("2. Second"));
+    }
+
+    #[test]
+    fn test_nested_lists_preserve_content_and_hierarchy() {
+        let html = "<ul><li>親<ul><li>子<ol><li>孫</li><li>孫2</li></ol></li><li>子2</li></ul></li><li>親2</li></ul>";
+        assert_eq!(
+            html_to_markdown(html, None),
+            "- 親\n  - 子\n    1. 孫\n    2. 孫2\n  - 子2\n- 親2"
+        );
+    }
+
+    #[test]
+    fn test_ordered_list_indents_children_by_marker_width() {
+        let mut html = String::from("<ol>");
+        for n in 1..=10 {
+            html.push_str(&format!("<li>Item {n}<ul><li>Child {n}</li></ul></li>"));
+        }
+        html.push_str("</ol>");
+        let md = html_to_markdown(&html, None);
+        assert!(
+            md.contains("9. Item 9\n   - Child 9\n10. Item 10\n    - Child 10"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn test_list_item_preserves_continuations_and_blocks() {
+        let html = "<ul><li><p>First<br>Second</p><ul><li><strong>Child</strong></li></ul><p>After child</p><pre><code>one\n  two</code></pre></li><li>Next</li></ul><p>Outside</p>";
+        assert_eq!(
+            html_to_markdown(html, None),
+            "- First  \n  Second\n\n  - **Child**\n\n  After child\n\n  ```\n  one\n    two\n  ```\n- Next\n\nOutside"
+        );
+    }
+
+    #[test]
+    fn test_list_item_without_text_preserves_nested_list() {
+        let html = "<ul><li>\n <ol><li>Child</li></ol></li><li>Next</li></ul>";
+        assert_eq!(html_to_markdown(html, None), "- \n  1. Child\n- Next");
     }
 
     #[test]
