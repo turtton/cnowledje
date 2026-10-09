@@ -35,7 +35,7 @@ GET /rest/api/2/myself
 
 ```bash
 set -euo pipefail
-VERSION=0.2.0
+VERSION=0.3.0
 case "$(uname -m)" in
   arm64)  TARGET=aarch64-apple-darwin ;;
   x86_64) TARGET=x86_64-apple-darwin ;;
@@ -88,13 +88,13 @@ brew upgrade cnowledje
 flakeは`Cargo.toml`からパッケージバージョンを読み取ります。
 
 ```bash
-nix profile install github:turtton/cnowledje/v0.2.0
+nix profile install github:turtton/cnowledje/v0.3.0
 ```
 
 ### ソースから
 
 ```bash
-cargo install --git https://github.com/turtton/cnowledje --tag v0.2.0 --locked
+cargo install --git https://github.com/turtton/cnowledje --tag v0.3.0 --locked
 ```
 
 ローカル開発では、引き続き`cargo install --path .`を利用できます。

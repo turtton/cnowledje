@@ -1,6 +1,6 @@
 [package]
 name = "cnowledje"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Read-only Confluence and Jira CLI for Server/Data Center"
 repository = "https://github.com/turtton/cnowledje"
